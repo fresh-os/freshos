@@ -28,7 +28,7 @@ const ACCENT_DIM: Color = Color::new(0x30, 0x50, 0x80);
 // ============================================================================
 
 const SURF_W: usize = 620;
-const SURF_H: usize = 400;
+const SURF_H: usize = 480;
 const MENU_H: usize = 26;
 const TBAR_H: usize = 36;
 const WIN_TITLE_H: usize = 28;

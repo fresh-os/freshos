@@ -85,9 +85,9 @@ const DIM: Color = Color::new(0x30, 0x36, 0x3D);
 const SEP: Color = Color::new(0x21, 0x26, 0x2D);
 const ORANGE: Color = Color::new(0xFF, 0xA6, 0x58);
 
-// Surfaces: each workspace is 620x400, fitting side by side above a taskbar
+// Surfaces: each workspace is 620x480, fitting side by side above a taskbar
 const SURF_W: usize = 620;
-const SURF_H: usize = 400;
+const SURF_H: usize = 480;
 // (Old taskbar constants replaced by TBAR_H / TBAR_Y in compositor section)
 const SURF_BYTES: usize = SURF_W * SURF_H * 4;
 const SURF_PAGES: usize = (SURF_BYTES + 4095) / 4096;
