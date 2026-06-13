@@ -82,6 +82,7 @@ struct Channel {
     tail: usize,
     count: usize,
     waiter: Option<usize>, // task blocked on recv
+    consumer: u16,         // last task to recv on this channel (0xFFFF = none yet)
 }
 
 const EMPTY_CHANNEL: Channel = Channel {
@@ -91,6 +92,7 @@ const EMPTY_CHANNEL: Channel = Channel {
     tail: 0,
     count: 0,
     waiter: None,
+    consumer: 0xFFFF,
 };
 
 struct ChannelsCell(UnsafeCell<[Channel; MAX_CHANNELS]>);
@@ -146,8 +148,15 @@ pub fn send(channel_id: u32, msg: &Message) -> Result<(), Error> {
         return Err(Error::Full);
     }
 
-    // Record who will receive (before we take() the waiter)
-    let receiver = ch.waiter.unwrap_or(0xFFFF);
+    // Record who will receive (before we take() the waiter). Prefer the task
+    // currently blocked on recv; otherwise fall back to the channel's learned
+    // consumer, so the trace attributes a destination even when delivery was
+    // buffered rather than handed to a blocked waiter.
+    let receiver = match ch.waiter {
+        Some(w) => w,
+        None if ch.consumer != 0xFFFF => ch.consumer as usize,
+        None => 0xFFFF,
+    };
     let now_ns = crate::arch::time_ns();
 
     ch.buf[ch.head] = *msg;
@@ -192,6 +201,10 @@ pub fn recv(channel_id: u32) -> Result<Message, Error> {
             return Err(Error::InvalidChannel);
         }
 
+        // Learn this channel's consumer so future sends can attribute a
+        // destination even when no task is blocked waiting.
+        ch.consumer = crate::arch::current_task() as u16;
+
         if ch.count > 0 {
             let msg = ch.buf[ch.tail];
             ch.tail = (ch.tail + 1) % CHANNEL_CAP;
@@ -217,7 +230,11 @@ pub fn try_recv(channel_id: u32) -> Option<Message> {
         return None;
     }
     let ch = unsafe { &mut (*channels())[id] };
-    if !ch.active || ch.count == 0 {
+    if !ch.active {
+        return None;
+    }
+    ch.consumer = crate::arch::current_task() as u16;
+    if ch.count == 0 {
         return None;
     }
     let msg = ch.buf[ch.tail];
