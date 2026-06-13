@@ -1,0 +1,9 @@
+[build]
+# Apple Silicon/HVF is the primary demo path for day-to-day development.
+# The x86_64 path remains the architecture reference path and is invoked
+# explicitly by run.sh.
+target = "aarch64-unknown-uefi"
+
+[unstable]
+build-std = ["core", "alloc"]
+build-std-features = ["compiler-builtins-mem"]

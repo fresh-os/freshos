@@ -1,0 +1,3 @@
+[workspace]
+members = ["kernel", "userbins/init", "userbins/pong", "userbins/pulse", "userbins/fault"]
+resolver = "2"

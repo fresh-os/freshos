@@ -1,0 +1,17 @@
+# Build output
+/target/
+/esp/
+/esp-arm/
+/disk.img
+/edk2-arm-vars.fd
+
+# Relocated to a separate docs repo
+/knowledge/
+
+# Local tooling, not for publication
+/.claude/
+/.agents/
+/skills-lock.json
+
+# macOS
+.DS_Store

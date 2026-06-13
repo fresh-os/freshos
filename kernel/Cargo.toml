@@ -1,0 +1,11 @@
+[package]
+name = "freshos-kernel"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+uefi = "0.33"
+rhai = { version = "1.24", default-features = false, features = ["no_std", "no_float", "only_i64", "no_module", "no_closure", "unchecked"] }
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+x86_64 = "0.15"
