@@ -752,16 +752,15 @@ fn draw_desktop_icons(fb: &mut Framebuffer) {
 // Task label helpers for message trace
 // ============================================================================
 
-const TASK_LABELS: [&str; 8] = ["idle", "kbd", "comp", "shell", "dash", "ping", "pong", "?"];
-const TASK_COLORS: [Color; 8] = [
-    DIM,
+/// Colour palette for message-flow nodes, indexed by node slot. Identity (the
+/// label) comes from the kernel task-name registry; colour is purely positional.
+const FLOW_PALETTE: [Color; 6] = [
     ACCENT,
-    SUBTLE,
     GREEN,
     ORANGE,
     Color::new(0x4F, 0x8B, 0xFF),
     Color::new(0xFF, 0xC1, 0x58),
-    DIM,
+    Color::new(0xD2, 0xA8, 0xFF),
 ];
 
 fn tag_label(tag: u16) -> &'static str {
@@ -784,6 +783,7 @@ static mut RAMFB_DISPLAY: Option<Framebuffer> = None;
 // ============================================================================
 
 pub fn compositor_el1() -> ! {
+    crate::task_names::register_current("comp");
     // Try virtio-GPU; fall back to ramfb if unavailable
     let (mut gpu, mut bb, sw, sh) =
         if let Some((gpu, fb)) = crate::arch::virtio_gpu::VirtioGpu::init() {
@@ -1645,6 +1645,7 @@ fn shell_run_command(
 }
 
 pub fn shell_el1() -> ! {
+    crate::task_names::register_current("shell");
     let mut surf = surface(0);
     surf.clear(SHELL_BG);
 
@@ -1803,29 +1804,38 @@ pub fn shell_el1() -> ! {
 // `to_task` gap (ipc.rs records the receiver only when it was blocked at send
 // time), made visible. Slice 2 closes it in the kernel.
 
-/// Task indices shown as graph nodes, in slot order. idle (0) is omitted — it
-/// never participates in message flow.
-const FLOW_NODES: [usize; 7] = [1, 2, 3, 4, 5, 6, 7];
+/// Maximum task id tracked in the flow view (matches arch MAX_TASKS).
+const FLOW_MAX: usize = 16;
 const FLOW_MARGIN: usize = 45;
 
-/// Map a task index to its node slot. Out-of-range receivers (0xFFFF, clamped)
-/// fold onto the "?" node; idle (0) has no node.
-fn flow_slot(task_idx: usize) -> Option<usize> {
-    let idx = if task_idx >= TASK_LABELS.len() {
-        TASK_LABELS.len() - 1
-    } else {
-        task_idx
-    };
-    if idx == 0 {
-        None
-    } else {
-        Some(idx - 1)
+/// X position of node `slot` when `total` nodes span the band.
+fn flow_node_x(slot: usize, total: usize) -> usize {
+    if total <= 1 {
+        return SURF_W / 2;
     }
+    let span = SURF_W - 2 * FLOW_MARGIN;
+    FLOW_MARGIN + slot * span / (total - 1)
 }
 
-fn flow_node_x(slot: usize) -> usize {
-    let span = SURF_W - 2 * FLOW_MARGIN;
-    FLOW_MARGIN + slot * span / (FLOW_NODES.len() - 1)
+/// Label for a task id: the kernel-registered name, else "t<id>", and "?" for
+/// an unknown/out-of-range id (e.g. an unattributed receiver).
+fn flow_name_buf(id: usize, buf: &mut [u8; 8]) -> &str {
+    if id >= FLOW_MAX {
+        return "?";
+    }
+    let name = crate::task_names::name(id);
+    if !name.is_empty() {
+        return name;
+    }
+    buf[0] = b't';
+    if id >= 10 {
+        buf[1] = b'0' + (id / 10) as u8;
+        buf[2] = b'0' + (id % 10) as u8;
+        core::str::from_utf8(&buf[..3]).unwrap_or("t")
+    } else {
+        buf[1] = b'0' + id as u8;
+        core::str::from_utf8(&buf[..2]).unwrap_or("t")
+    }
 }
 
 fn fill_disc(fb: &mut Framebuffer, cx: usize, cy: usize, r: usize, c: Color) {
@@ -1883,6 +1893,7 @@ fn draw_arc(fb: &mut Framebuffer, x0: usize, x1: usize, base_y: usize, rise: usi
 // ============================================================================
 
 pub fn dashboard_el1() -> ! {
+    crate::task_names::register_current("dash");
     let mut surf = surface(1);
 
     let mut trace_buf = [ipc::TraceEntry {
@@ -1892,6 +1903,10 @@ pub fn dashboard_el1() -> ! {
         channel: 0,
         tag: 0,
     }; 24];
+    // Tasks that have ever appeared in the trace, so the node layout is stable
+    // as the system warms up rather than flickering with each message.
+    let mut seen = [false; FLOW_MAX];
+    let mut seen_unknown = false;
 
     crate::serial::serial_println!("[dash] running");
     let mut last_metrics_log_ns: u64 = 0;
@@ -1996,7 +2011,9 @@ pub fn dashboard_el1() -> ! {
         );
         y += 22;
 
-        // Message flow — live diagram (see the FLOW_NODES helpers above).
+        // Message flow — live diagram. Nodes and labels come from the kernel
+        // (the trace + task_names registry), not a hardcoded table, so identity
+        // stays honest as the scheduler assigns ids.
         let header_y = y;
         surf.draw_aa_string(14, y, "Message Flow", ORANGE, DASH_BG);
         y += 14;
@@ -2005,46 +2022,87 @@ pub fn dashboard_el1() -> ! {
 
         let now = time_ns();
         let count = trace_read(&mut trace_buf);
-
-        // Caption: the most recent message as plain "from -> to  TAG", so the
-        // message *type* stays legible even though the graph itself shows flow.
-        if count > 0 {
-            let e = &trace_buf[count - 1];
-            let fi = (e.from_task as usize).min(TASK_LABELS.len() - 1);
-            let ti = (e.to_task as usize).min(TASK_LABELS.len() - 1);
-            let mut rx = 14 + "Message Flow".len() * font_aa::GLYPH_W + 16;
-            surf.draw_aa_string(rx, header_y, TASK_LABELS[fi], TASK_COLORS[fi], DASH_BG);
-            rx += TASK_LABELS[fi].len() * font_aa::GLYPH_W;
-            surf.draw_aa_string(rx, header_y, " -> ", DIM, DASH_BG);
-            rx += 4 * font_aa::GLYPH_W;
-            surf.draw_aa_string(rx, header_y, TASK_LABELS[ti], TASK_COLORS[ti], DASH_BG);
-            rx += TASK_LABELS[ti].len() * font_aa::GLYPH_W + font_aa::GLYPH_W;
-            surf.draw_aa_string(rx, header_y, tag_label(e.tag), GREEN, DASH_BG);
-        }
+        let show = count.min(12);
+        let start = count - show;
 
         let base_y = SURF_H - 50; // node baseline; arcs bow up into the band above
         let label_y = base_y + 9; // task labels sit just under their nodes
         let max_rise = base_y.saturating_sub(y + 4); // keep arcs below the separator
 
-        if count == 0 {
+        // Note every task that has appeared, then assign each a node slot in id
+        // order. Unknown destinations (0xFFFF, pre-consumer) share a "?" slot.
+        for row in 0..count {
+            let e = &trace_buf[row];
+            let (f, t) = (e.from_task as usize, e.to_task as usize);
+            if f < FLOW_MAX {
+                seen[f] = true;
+            }
+            if t < FLOW_MAX {
+                seen[t] = true;
+            } else {
+                seen_unknown = true;
+            }
+        }
+        let mut slot_of = [usize::MAX; FLOW_MAX];
+        let mut node_ids = [0usize; FLOW_MAX];
+        let mut node_count = 0;
+        for (id, &was_seen) in seen.iter().enumerate() {
+            if was_seen {
+                slot_of[id] = node_count;
+                node_ids[node_count] = id;
+                node_count += 1;
+            }
+        }
+        let unknown_slot = node_count;
+        let total_slots = node_count + if seen_unknown { 1 } else { 0 };
+
+        // Resolve a trace entry to (sender slot, receiver slot), or None.
+        let edge_slots = |e: &ipc::TraceEntry| -> Option<(usize, usize)> {
+            let f = e.from_task as usize;
+            if f >= FLOW_MAX || slot_of[f] == usize::MAX {
+                return None;
+            }
+            let t = e.to_task as usize;
+            let st = if t < FLOW_MAX && slot_of[t] != usize::MAX {
+                slot_of[t]
+            } else if seen_unknown {
+                unknown_slot
+            } else {
+                return None;
+            };
+            if slot_of[f] == st {
+                return None;
+            }
+            Some((slot_of[f], st))
+        };
+
+        if total_slots == 0 {
             surf.draw_aa_string(14, y, "(waiting for messages...)", DIM, DASH_BG);
         }
 
-        let show = count.min(12);
-        let start = count - show;
+        // Caption: the most recent message as "from -> to  TAG", kernel names.
+        if count > 0 {
+            let e = &trace_buf[count - 1];
+            let mut fbuf = [0u8; 8];
+            let mut tbuf = [0u8; 8];
+            let from = flow_name_buf(e.from_task as usize, &mut fbuf);
+            let to = flow_name_buf(e.to_task as usize, &mut tbuf);
+            let mut rx = 14 + "Message Flow".len() * font_aa::GLYPH_W + 16;
+            surf.draw_aa_string(rx, header_y, from, SUBTLE, DASH_BG);
+            rx += from.len() * font_aa::GLYPH_W;
+            surf.draw_aa_string(rx, header_y, " -> ", DIM, DASH_BG);
+            rx += 4 * font_aa::GLYPH_W;
+            surf.draw_aa_string(rx, header_y, to, GREEN, DASH_BG);
+            rx += to.len() * font_aa::GLYPH_W + font_aa::GLYPH_W;
+            surf.draw_aa_string(rx, header_y, tag_label(e.tag), GREEN, DASH_BG);
+        }
 
         // Arcs first (oldest underneath), faded by age.
         for row in 0..show {
             let e = &trace_buf[start + row];
-            let (Some(sf), Some(st)) = (
-                flow_slot(e.from_task as usize),
-                flow_slot(e.to_task as usize),
-            ) else {
+            let Some((sf, st)) = edge_slots(e) else {
                 continue;
             };
-            if sf == st {
-                continue;
-            }
             let age_ms = now.saturating_sub(e.timestamp_ns) / 1_000_000;
             let c = if age_ms < 300 {
                 GREEN
@@ -2053,19 +2111,33 @@ pub fn dashboard_el1() -> ! {
             } else {
                 DIM
             };
-            let x0 = flow_node_x(sf);
-            let x1 = flow_node_x(st);
+            let x0 = flow_node_x(sf, total_slots);
+            let x1 = flow_node_x(st, total_slots);
             let rise = (12 + x0.abs_diff(x1) / 8).min(max_rise);
             draw_arc(&mut surf, x0, x1, base_y, rise, c);
         }
 
         // Nodes and labels on top of the arcs.
-        for (slot, &idx) in FLOW_NODES.iter().enumerate() {
-            let nx = flow_node_x(slot);
-            fill_disc(&mut surf, nx, base_y, 4, TASK_COLORS[idx]);
-            let label = TASK_LABELS[idx];
+        for slot in 0..node_count {
+            let id = node_ids[slot];
+            let nx = flow_node_x(slot, total_slots);
+            fill_disc(
+                &mut surf,
+                nx,
+                base_y,
+                4,
+                FLOW_PALETTE[slot % FLOW_PALETTE.len()],
+            );
+            let mut nbuf = [0u8; 8];
+            let label = flow_name_buf(id, &mut nbuf);
             let lx = nx.saturating_sub(label.len() * font_aa::GLYPH_W / 2);
             surf.draw_aa_string(lx, label_y, label, SUBTLE, DASH_BG);
+        }
+        if seen_unknown {
+            let nx = flow_node_x(unknown_slot, total_slots);
+            fill_disc(&mut surf, nx, base_y, 4, DIM);
+            let lx = nx.saturating_sub(font_aa::GLYPH_W / 2);
+            surf.draw_aa_string(lx, label_y, "?", SUBTLE, DASH_BG);
         }
 
         // A pulse travels sender -> receiver over ~600ms, drawn last so it sits on
@@ -2074,21 +2146,15 @@ pub fn dashboard_el1() -> ! {
         let pulse_c = Color::new(0xC8, 0xFF, 0xD2);
         for row in 0..show {
             let e = &trace_buf[start + row];
-            let (Some(sf), Some(st)) = (
-                flow_slot(e.from_task as usize),
-                flow_slot(e.to_task as usize),
-            ) else {
+            let Some((sf, st)) = edge_slots(e) else {
                 continue;
             };
-            if sf == st {
-                continue;
-            }
             let age_ms = now.saturating_sub(e.timestamp_ns) / 1_000_000;
             if age_ms >= PULSE_MS {
                 continue;
             }
-            let x0 = flow_node_x(sf);
-            let x1 = flow_node_x(st);
+            let x0 = flow_node_x(sf, total_slots);
+            let x1 = flow_node_x(st, total_slots);
             let rise = (12 + x0.abs_diff(x1) / 8).min(max_rise);
             let (px, py) = flow_arc_point(x0, x1, base_y, rise, age_ms as i32, PULSE_MS as i32);
             fill_disc(&mut surf, px, py, 3, pulse_c);
@@ -2112,6 +2178,7 @@ pub fn dashboard_el1() -> ! {
 // ============================================================================
 
 pub fn ipc_probe_ping_el1() -> ! {
+    crate::task_names::register_current("ping");
     crate::serial::serial_println!("[probe] ping");
     let mut sample_count: u64 = 0;
 
@@ -2144,6 +2211,7 @@ pub fn ipc_probe_ping_el1() -> ! {
 }
 
 pub fn ipc_probe_pong_el1() -> ! {
+    crate::task_names::register_current("pong");
     crate::serial::serial_println!("[probe] pong");
 
     loop {
@@ -2187,6 +2255,7 @@ pub fn supervised_fault_el1() -> ! {
 // ============================================================================
 
 pub fn keyboard_el1() -> ! {
+    crate::task_names::register_current("kbd");
     crate::serial::serial_println!("[kbd] polling UART");
 
     loop {

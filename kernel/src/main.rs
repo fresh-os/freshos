@@ -15,6 +15,7 @@ mod heap;
 pub mod ipc;
 mod metrics;
 mod serial;
+mod task_names;
 
 // x86_64-specific modules — not compiled on aarch64
 #[cfg(target_arch = "x86_64")]
