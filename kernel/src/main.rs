@@ -208,6 +208,24 @@ fn main() -> Status {
     let gop_handle = boot::get_handle_for_protocol::<GraphicsOutput>().expect("GOP not available");
     let mut gop =
         boot::open_protocol_exclusive::<GraphicsOutput>(gop_handle).expect("failed to open GOP");
+
+    // The firmware default is small (800x600 on QEMU). Switch to the largest
+    // mode the firmware offers, within a cap that keeps the compositor's
+    // framebuffer allocations sane, for a roomier desktop.
+    let best_mode = gop
+        .modes()
+        .filter(|m| {
+            let (w, h) = m.info().resolution();
+            w <= 1920 && h <= 1200
+        })
+        .max_by_key(|m| {
+            let (w, h) = m.info().resolution();
+            w * h
+        });
+    if let Some(target) = best_mode {
+        let _ = gop.set_mode(&target);
+    }
+
     let mode = gop.current_mode_info();
     let (width, height) = mode.resolution();
     let stride = mode.stride();
