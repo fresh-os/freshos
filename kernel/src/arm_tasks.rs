@@ -1794,7 +1794,92 @@ pub fn shell_el1() -> ! {
 }
 
 // ============================================================================
-// Dashboard — renders to surface 1, shows system info + message trace
+// Message-flow graph (OBS.1) — render the live trace as a diagram, not a list
+// ============================================================================
+//
+// Tasks are nodes on a baseline; each recent message is an arc between its
+// sender and receiver, faded by age, with a pulse that travels sender -> receiver
+// as the message ages. Unknown receivers land on the "?" node — that is the
+// `to_task` gap (ipc.rs records the receiver only when it was blocked at send
+// time), made visible. Slice 2 closes it in the kernel.
+
+/// Task indices shown as graph nodes, in slot order. idle (0) is omitted — it
+/// never participates in message flow.
+const FLOW_NODES: [usize; 7] = [1, 2, 3, 4, 5, 6, 7];
+const FLOW_MARGIN: usize = 45;
+
+/// Map a task index to its node slot. Out-of-range receivers (0xFFFF, clamped)
+/// fold onto the "?" node; idle (0) has no node.
+fn flow_slot(task_idx: usize) -> Option<usize> {
+    let idx = if task_idx >= TASK_LABELS.len() {
+        TASK_LABELS.len() - 1
+    } else {
+        task_idx
+    };
+    if idx == 0 {
+        None
+    } else {
+        Some(idx - 1)
+    }
+}
+
+fn flow_node_x(slot: usize) -> usize {
+    let span = SURF_W - 2 * FLOW_MARGIN;
+    FLOW_MARGIN + slot * span / (FLOW_NODES.len() - 1)
+}
+
+fn fill_disc(fb: &mut Framebuffer, cx: usize, cy: usize, r: usize, c: Color) {
+    let ri = r as i32;
+    let r2 = ri * ri;
+    for dy in -ri..=ri {
+        for dx in -ri..=ri {
+            if dx * dx + dy * dy <= r2 {
+                let x = cx as i32 + dx;
+                let y = cy as i32 + dy;
+                if x >= 0 && y >= 0 {
+                    fb.put_pixel(x as usize, y as usize, c);
+                }
+            }
+        }
+    }
+}
+
+/// Point at parameter `num/den` along a quadratic Bézier arc bowing `rise`
+/// pixels above the baseline between (x0,base_y) and (x1,base_y).
+fn flow_arc_point(
+    x0: usize,
+    x1: usize,
+    base_y: usize,
+    rise: usize,
+    num: i32,
+    den: i32,
+) -> (usize, usize) {
+    let p0x = x0 as i32;
+    let p2x = x1 as i32;
+    let p1x = (p0x + p2x) / 2;
+    let by = base_y as i32;
+    let p1y = by - 2 * rise as i32; // control point: apex (t=0.5) sits `rise` above baseline
+    let t = num.clamp(0, den);
+    let u = den - t;
+    let d2 = den * den;
+    let x = (u * u * p0x + 2 * u * t * p1x + t * t * p2x) / d2;
+    let y = (u * u * by + 2 * u * t * p1y + t * t * by) / d2;
+    (x.max(0) as usize, y.max(0) as usize)
+}
+
+fn draw_arc(fb: &mut Framebuffer, x0: usize, x1: usize, base_y: usize, rise: usize, c: Color) {
+    const STEPS: i32 = 56;
+    let mut k = 0;
+    while k <= STEPS {
+        let (x, y) = flow_arc_point(x0, x1, base_y, rise, k, STEPS);
+        fb.put_pixel(x, y, c);
+        fb.put_pixel(x + 1, y, c); // 2px thick for visibility
+        k += 1;
+    }
+}
+
+// ============================================================================
+// Dashboard — renders to surface 1, shows system info + message flow
 // ============================================================================
 
 pub fn dashboard_el1() -> ! {
@@ -1806,7 +1891,7 @@ pub fn dashboard_el1() -> ! {
         to_task: 0,
         channel: 0,
         tag: 0,
-    }; 16];
+    }; 24];
 
     crate::serial::serial_println!("[dash] running");
     let mut last_metrics_log_ns: u64 = 0;
@@ -1911,74 +1996,102 @@ pub fn dashboard_el1() -> ! {
         );
         y += 22;
 
-        // Message flow
+        // Message flow — live diagram (see the FLOW_NODES helpers above).
+        let header_y = y;
         surf.draw_aa_string(14, y, "Message Flow", ORANGE, DASH_BG);
         y += 14;
         surf.draw_rect(14, y, SURF_W - 28, 1, SEP);
-        y += 8;
+        y += 10;
 
         let now = time_ns();
         let count = trace_read(&mut trace_buf);
 
+        // Caption: the most recent message as plain "from -> to  TAG", so the
+        // message *type* stays legible even though the graph itself shows flow.
+        if count > 0 {
+            let e = &trace_buf[count - 1];
+            let fi = (e.from_task as usize).min(TASK_LABELS.len() - 1);
+            let ti = (e.to_task as usize).min(TASK_LABELS.len() - 1);
+            let mut rx = 14 + "Message Flow".len() * font_aa::GLYPH_W + 16;
+            surf.draw_aa_string(rx, header_y, TASK_LABELS[fi], TASK_COLORS[fi], DASH_BG);
+            rx += TASK_LABELS[fi].len() * font_aa::GLYPH_W;
+            surf.draw_aa_string(rx, header_y, " -> ", DIM, DASH_BG);
+            rx += 4 * font_aa::GLYPH_W;
+            surf.draw_aa_string(rx, header_y, TASK_LABELS[ti], TASK_COLORS[ti], DASH_BG);
+            rx += TASK_LABELS[ti].len() * font_aa::GLYPH_W + font_aa::GLYPH_W;
+            surf.draw_aa_string(rx, header_y, tag_label(e.tag), GREEN, DASH_BG);
+        }
+
+        let base_y = SURF_H - 50; // node baseline; arcs bow up into the band above
+        let label_y = base_y + 9; // task labels sit just under their nodes
+        let max_rise = base_y.saturating_sub(y + 4); // keep arcs below the separator
+
         if count == 0 {
             surf.draw_aa_string(14, y, "(waiting for messages...)", DIM, DASH_BG);
-        } else {
-            let show = count.min(4);
-            let start = count.saturating_sub(show);
+        }
 
-            for row in 0..show {
-                let e = &trace_buf[start + row];
-                let age_ms = if now > e.timestamp_ns {
-                    (now - e.timestamp_ns) / 1_000_000
-                } else {
-                    0
-                };
-                let color = if age_ms < 300 {
-                    GREEN
-                } else if age_ms < 2000 {
-                    SUBTLE
-                } else {
-                    DIM
-                };
+        let show = count.min(12);
+        let start = count - show;
 
-                let mut rx = 14;
-                let gw = font_aa::GLYPH_W;
-
-                // Age
-                let mut abuf = [b' '; 4];
-                let mut av = age_ms;
-                let mut ai = 3;
-                loop {
-                    abuf[ai] = b'0' + (av % 10) as u8;
-                    av /= 10;
-                    if av == 0 || ai == 0 {
-                        break;
-                    }
-                    ai -= 1;
-                }
-                for &b in &abuf {
-                    surf.draw_aa_char(rx, y, b as char, DIM, DASH_BG);
-                    rx += gw;
-                }
-                surf.draw_aa_string(rx, y, "ms", DIM, DASH_BG);
-                rx += gw * 3;
-
-                let fi = (e.from_task as usize).min(TASK_LABELS.len() - 1);
-                let ti = (e.to_task as usize).min(TASK_LABELS.len() - 1);
-                surf.draw_aa_string(rx, y, TASK_LABELS[fi], TASK_COLORS[fi], DASH_BG);
-                rx += TASK_LABELS[fi].len() * gw;
-                surf.draw_aa_string(rx, y, ">", color, DASH_BG);
-                rx += gw;
-                if (e.to_task as usize) < TASK_LABELS.len() - 1 {
-                    surf.draw_aa_string(rx, y, TASK_LABELS[ti], TASK_COLORS[ti], DASH_BG);
-                    rx += TASK_LABELS[ti].len() * gw + gw;
-                } else {
-                    surf.draw_aa_string(rx, y, "?", DIM, DASH_BG);
-                    rx += gw * 2;
-                }
-                surf.draw_aa_string(rx, y, tag_label(e.tag), color, DASH_BG);
-                y += 14;
+        // Arcs first (oldest underneath), faded by age.
+        for row in 0..show {
+            let e = &trace_buf[start + row];
+            let (Some(sf), Some(st)) = (
+                flow_slot(e.from_task as usize),
+                flow_slot(e.to_task as usize),
+            ) else {
+                continue;
+            };
+            if sf == st {
+                continue;
             }
+            let age_ms = now.saturating_sub(e.timestamp_ns) / 1_000_000;
+            let c = if age_ms < 300 {
+                GREEN
+            } else if age_ms < 2000 {
+                SUBTLE
+            } else {
+                DIM
+            };
+            let x0 = flow_node_x(sf);
+            let x1 = flow_node_x(st);
+            let rise = (12 + x0.abs_diff(x1) / 8).min(max_rise);
+            draw_arc(&mut surf, x0, x1, base_y, rise, c);
+        }
+
+        // Nodes and labels on top of the arcs.
+        for (slot, &idx) in FLOW_NODES.iter().enumerate() {
+            let nx = flow_node_x(slot);
+            fill_disc(&mut surf, nx, base_y, 4, TASK_COLORS[idx]);
+            let label = TASK_LABELS[idx];
+            let lx = nx.saturating_sub(label.len() * font_aa::GLYPH_W / 2);
+            surf.draw_aa_string(lx, label_y, label, SUBTLE, DASH_BG);
+        }
+
+        // A pulse travels sender -> receiver over ~600ms, drawn last so it sits on
+        // top: fresh messages appear at the sender, older ones near the receiver.
+        const PULSE_MS: u64 = 600;
+        let pulse_c = Color::new(0xC8, 0xFF, 0xD2);
+        for row in 0..show {
+            let e = &trace_buf[start + row];
+            let (Some(sf), Some(st)) = (
+                flow_slot(e.from_task as usize),
+                flow_slot(e.to_task as usize),
+            ) else {
+                continue;
+            };
+            if sf == st {
+                continue;
+            }
+            let age_ms = now.saturating_sub(e.timestamp_ns) / 1_000_000;
+            if age_ms >= PULSE_MS {
+                continue;
+            }
+            let x0 = flow_node_x(sf);
+            let x1 = flow_node_x(st);
+            let rise = (12 + x0.abs_diff(x1) / 8).min(max_rise);
+            let (px, py) = flow_arc_point(x0, x1, base_y, rise, age_ms as i32, PULSE_MS as i32);
+            fill_disc(&mut surf, px, py, 3, pulse_c);
         }
 
         // Footer
