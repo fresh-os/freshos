@@ -53,7 +53,6 @@ exec qemu-system-aarch64 \
     -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
     -drive if=pflash,format=raw,file="$OVMF_VARS" \
     -device ramfb \
-    -device virtio-gpu-device \
     -global virtio-mmio.force-legacy=false \
     -display cocoa \
     -device qemu-xhci \
