@@ -1,6 +1,39 @@
 # FreshOS: Where We Are
 
-*April 2026*
+*April 2026 — last updated 13 June 2026*
+
+## Current status — 13 June 2026
+
+FreshOS now has a strategic anchor: **useful means observable**, not a daily
+driver (see `docs/decisions/0001-useful-means-observable.md`). Work is driven by
+two north-star milestones — **★ Observable by Default** and **★ First Living
+Citizen** — which the M1–M7 substrate exists to serve.
+
+**Shipped:** the live message-flow diagram (OBS.1) on the aarch64 demo path. The
+dashboard renders tasks as nodes and recent messages as arcs with a pulse that
+travels sender → receiver. Identity is honest: nodes are labelled from a
+kernel-owned task-name registry (`kernel/src/task_names.rs`, named at the
+service-spawn dispatch in `init_abi.rs`), and destinations are attributed via
+channel consumers (`kernel/src/ipc.rs`) even when delivery was buffered. The
+desktop is composited to **ramfb** after the virtio-GPU scanout was found to be
+invisible under QEMU `-display cocoa` (`run-arm.sh`).
+
+**▶ Next action — issue #63: a `virtio-input` GUI keyboard driver.** Today input
+only reaches the desktop through the serial UART (`keyboard_el1` polls
+`serial_try_read`), so the "interactive" demo cannot be driven from its own
+window — you can't switch workspaces or type into the shell from the GUI. A
+userspace `virtio-input` driver (plus `-device virtio-keyboard-device` in
+`run-arm.sh`) turns FreshOS from a thing you watch into a thing you use, and
+unblocks GUI-driven demoing. Well-scoped; the natural next session.
+
+**Also open:** #65 (stats overlay flickers over the dashboard — compositor
+z-order), and the rest of ★ Observable — always-on latency counter, visible
+capability graph, per-message inspection, time-travel replay.
+
+> The sections below predate this status block and describe the April state; the
+> architecture narrative still holds, but treat specifics as historical.
+
+---
 
 ## What exists
 
