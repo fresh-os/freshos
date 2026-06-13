@@ -253,6 +253,7 @@ extern "C" fn init_spawn_service(service_id: u64) -> i64 {
     let had_previous_exit =
         SERVICE_LAST_EXITS[service_idx].load(Ordering::SeqCst) != SERVICE_EXIT_NONE;
     let task_id = (definition.spawn)();
+    crate::task_names::register(task_id, definition.name);
 
     if had_previous_exit {
         SERVICE_RESTARTS[service_idx].fetch_add(1, Ordering::SeqCst);

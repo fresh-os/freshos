@@ -783,7 +783,6 @@ static mut RAMFB_DISPLAY: Option<Framebuffer> = None;
 // ============================================================================
 
 pub fn compositor_el1() -> ! {
-    crate::task_names::register_current("comp");
     // Try virtio-GPU; fall back to ramfb if unavailable
     let (mut gpu, mut bb, sw, sh) =
         if let Some((gpu, fb)) = crate::arch::virtio_gpu::VirtioGpu::init() {
@@ -1645,7 +1644,6 @@ fn shell_run_command(
 }
 
 pub fn shell_el1() -> ! {
-    crate::task_names::register_current("shell");
     let mut surf = surface(0);
     surf.clear(SHELL_BG);
 
@@ -1893,7 +1891,6 @@ fn draw_arc(fb: &mut Framebuffer, x0: usize, x1: usize, base_y: usize, rise: usi
 // ============================================================================
 
 pub fn dashboard_el1() -> ! {
-    crate::task_names::register_current("dash");
     let mut surf = surface(1);
 
     let mut trace_buf = [ipc::TraceEntry {
@@ -2178,7 +2175,6 @@ pub fn dashboard_el1() -> ! {
 // ============================================================================
 
 pub fn ipc_probe_ping_el1() -> ! {
-    crate::task_names::register_current("ping");
     crate::serial::serial_println!("[probe] ping");
     let mut sample_count: u64 = 0;
 
@@ -2211,7 +2207,6 @@ pub fn ipc_probe_ping_el1() -> ! {
 }
 
 pub fn ipc_probe_pong_el1() -> ! {
-    crate::task_names::register_current("pong");
     crate::serial::serial_println!("[probe] pong");
 
     loop {
@@ -2255,7 +2250,6 @@ pub fn supervised_fault_el1() -> ! {
 // ============================================================================
 
 pub fn keyboard_el1() -> ! {
-    crate::task_names::register_current("kbd");
     crate::serial::serial_println!("[kbd] polling UART");
 
     loop {

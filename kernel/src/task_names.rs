@@ -20,9 +20,10 @@ unsafe impl Sync for NamesCell {}
 
 static NAMES: NamesCell = NamesCell(UnsafeCell::new([""; MAX]));
 
-/// Register a display name for the calling task.
-pub fn register_current(name: &'static str) {
-    let id = crate::arch::current_task();
+/// Register a display name for a specific task id. Called at the service-spawn
+/// dispatch, where the kernel knows both the id and the service name — the only
+/// place that can also name external (ELF) services, which never run kernel code.
+pub fn register(id: usize, name: &'static str) {
     if id < MAX {
         unsafe { (*NAMES.0.get())[id] = name };
     }
