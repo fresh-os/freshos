@@ -18,8 +18,20 @@ supersedes: 0001 (in part)
 FreshOS should be able to become an operating system that people really use:
 one you could reboot into and live in. That is the long-term destination.
 
-This reverses 0001's explicit rejection of the daily driver. How to get there,
-and in what order, is not yet decided.
+This reverses 0001's explicit rejection of the daily driver. The route is the
+v1 ladder in `docs/FreshOS-v1-Scope.md`: an honest kernel on the Pi 4, then
+storage, a usable desktop, basic games, networking (email first), and the web.
+
+**Responsiveness and observability are FreshOS's twin goals**, and the reason
+to choose it over any other daily driver:
+
+- **Responsiveness:** the manifesto's performance contracts are guarantees,
+  shown on screen. Input reaches the display within one frame, a small IPC
+  round trip takes under 1 µs, and the compositor never misses a frame.
+- **Observability:** you can see the machine think. Every message,
+  capability and latency is visible in the running system.
+
+A daily driver that gives up either one is not FreshOS.
 
 ## Why
 
@@ -38,9 +50,9 @@ destination is legitimate.
 - Shortcuts that permanently prevent real use must be named as temporary.
   The main one is aarch64 running the desktop at EL1 without per-task
   isolation.
-- The anti-features in `design-philosophy.md`, especially "no browser engine",
-  now conflict with the destination. Resolve them in a follow-up decision;
-  do not bypass them quietly.
+- The web comes through an embedded renderer (Servo) or a sandboxed Linux VM,
+  as the manifesto's *Web Browsing* section already says. FreshOS still never
+  builds a browser engine, and POSIX compatibility is still not a goal.
 - **Existing code has no protected status.** Any subsystem may be rewritten
   or deleted if that serves the destination better than rescuing it. This
   overrides the global "rescue beats replace" value for FreshOS, because the
@@ -51,10 +63,6 @@ destination is legitimate.
 
 ## Open questions
 
-- Does observability remain FreshOS's distinguishing edge, and so the reason
-  anyone would choose it? Or does it become one feature among many?
-- What is the minimum a "daily driver" must include (persistence, networking,
-  a browser, applications), and which of those does FreshOS build versus port?
 - What happens to ★ First Living Citizen?
 
 ## Drift triggers
@@ -62,5 +70,8 @@ destination is legitimate.
 - "It only has to work in the demo"
 - Treating an EL1, shared-TTBR0 or no-isolation shortcut as permanent
 - Dismissing persistence, crash survival or real input as "not the point"
-- Adding a large subsystem (networking, a browser, POSIX) without first
-  resolving the conflict with `design-philosophy.md`
+- Building a browser engine, or pursuing POSIX compatibility (both remain
+  anti-features)
+- Working on a later rung of the v1 ladder while an earlier one is unfinished
+- Adding a feature that cannot be seen in the flow view or measured against
+  the performance contracts, or deferring that measurement to "later"

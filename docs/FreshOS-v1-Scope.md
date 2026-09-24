@@ -1,92 +1,59 @@
-# FreshOS v1: The First Proof
+# FreshOS v1: A Machine You Can Use
 
-## The Test
+## The test
 
 Every decision about v1 is measured against one question:
 
-**Does this make the architecture perceptible?**
+**Can Steve use this Raspberry Pi 4 for real work and play, and see how it works while he does?**
 
-If a feature makes the user *see* the architecture working, it's in. If it's a consequence that falls out later, it's out. v1 exists to prove a single claim: that an OS can be built where the system is visibly alive, the interaction feels fundamentally different, and the architecture makes both of those things inevitable.
+Responsiveness and observability are the twin goals, and they run through
+every rung. Each demo shows its new work in the live message-flow view, with
+the latency counter on screen and within contract.
 
----
+## The ladder
 
-## v1 Definitely Is
+Each rung ends with a demo on a real Pi 4.
 
-**A Rust microkernel on x86_64/UEFI** that boots on real hardware and runs in QEMU.
+1. **Honest kernel.** Boots to serial on the Pi 4, then runs tasks at EL0
+   with per-task page tables and validated syscall pointers.
+   Demo: a service faults and its siblings survive.
+   *Decision gate:* benchmark software compositing at 1080p before rung 3.
+   *Decision:* whether the kernel owns EL2 (needed for rung 6's Linux VM).
+2. **Remembers.** A generic service runtime, and a writable filesystem on
+   the SD card.
+   Demo: write a note, reboot, read it back.
+3. **Usable at the desk.** USB keyboard and mouse, the HDMI desktop, a shell
+   and a text editor, all as supervised services.
+   Demo: edit a file, kill the editor, restart it, carry on.
+4. **Plays.** Audio output, gamepad input, frame pacing, and a native game
+   SDK on a shared ABI crate. Games install by copying to the SD card.
+   Demo: a basic game built outside the kernel repo runs at a steady frame
+   rate, with its messages visible in the flow view.
+5. **Connected.** Ethernet, then a first bridge service (email).
+   Demo: read and send email.
+6. **Browses.** Web content through an embedded renderer (Servo) or a
+   sandboxed Linux VM, per the rung 1 EL2 decision.
+   Demo: read a web page.
 
-**Typed message-passing IPC** between isolated userspace processes. This is the spine. Every other feature is a consequence of this working and being fast.
+## The compositing gate
 
-**A GPU-accelerated compositor** that owns the frame. Deterministic frame scheduling. The compositor never misses. If an app is slow, the compositor presents the last good frame. The user never waits for the system.
+Software compositing with damage tracking is the default. On a real Pi 4,
+benchmark a full-frame redraw, a small damaged area, and several stacked
+layers at 1080p. The pass mark is the manifesto's own contract: one frame at
+60 Hz, with enough headroom left for a game. If software compositing passes,
+a GPU (VideoCore VI) driver waits until after v1. If it fails, the GPU driver
+moves up the ladder.
 
-**Spatial workspaces.** Zoom out to see every workspace running simultaneously, live, in real-time. Every workspace is a fully independent environment, all rendering concurrently, all visible at once. Zoom in to focus on one. This isn't switching desktops — it's changing altitude. You fly up, see the entire system alive, and dive into what you want. This is the first thing a user sees and the first thing that feels different.
+## v1 is not
 
-**Live message-flow visualisation.** Every message between every process, rendered in real-time as a living diagram. Not a developer tool. Not hidden in a menu. A workspace you can drag down and look at, showing the system thinking. This is the signature feature — the thing that makes architecture perceptible.
-
-**A visible latency contract.** Input-to-photon time displayed in microseconds, always visible, never exceeding the guarantee. The system proves its own performance to the user. This is the trust mechanism.
-
-**Capability-based process isolation.** Processes hold capabilities to message channels. No capability, no access, no visibility. Security is structural and inspectable — you can see the capability graph in the introspection view.
-
-**A userspace keyboard and mouse driver** communicating through typed messages. The kernel doesn't know what a keyboard is. It just delivered a message. This is the proof that the microkernel pattern is real.
-
-**A basic userspace storage driver.** Enough to load and persist data. Not a full filesystem — the minimum viable path to "the system can remember things."
-
-**One scripting integration.** A lightweight runtime (Lua, Rhai, or similar) with native access to the message layer. Enough to write three lines that glue two services together. Proves pervasive scripting is real, not theoretical.
-
-**One or two tiny native services** that demonstrate statefulness — a notepad, a system monitor, a clock. Small enough to build in a day. Real enough to prove that native apps work, receive messages, persist state, and show up in the introspection view.
-
----
-
-## v1 Definitely Is Not
-
-**Not an emulation platform.** Emu198x convergence is the long horizon. v1 has no emulators, no vintage CPU cores, no cross-architecture bridging. That's later.
-
-**Not a server OS.** No orchestration, no clustering, no multi-machine message routing. The server edition validates the architecture's generality. v1 validates the architecture.
-
-**Not a smart home hub.** No Zigbee, no Z-Wave, no device bridges, no physical automation. The physical world features are consequences of the message layer working. v1 proves the message layer works.
-
-**Not an automotive platform.** Obviously.
-
-**Not an email client.** No IMAP bridge, no CalDAV bridge, no contacts, no real-world data integration. Those are bridge services that sit on top of a working message layer. v1 builds the message layer.
-
-**Not a web browser.** No Servo, no sandboxed Linux VM, no web content rendering of any kind.
-
-**Not a real-time data platform.** No market feeds, no energy monitoring, no telemetry dashboards. The architecture supports all of this. v1 doesn't need to prove it yet.
-
-**Not a daily driver.** v1 is a proof of concept. You boot it, you experience it, you understand what FreshOS is. Then you reboot into your actual OS and get on with your day.
-
-**Not feature-complete.** No acoustic identity yet. No semantic clipboard. No universal undo. No time-travel replay. No hot reload. No app fragments. These are all consequences of the architecture, and they'll arrive when the architecture is solid. They are not v1.
+- Hardware beyond the Pi 4 (the Pi 5 comes after v1)
+- POSIX compatibility or a package manager
+- A GPU driver, unless the compositing gate says software is too slow
+- Anything in [`FreshOS-Horizon.md`](FreshOS-Horizon.md)
 
 ---
 
-## The Single Demo Moment
-
-Spatial workspaces. Live message-flow visualisation. Visible latency contract.
-
-Three things. One screen. Two seconds to understand.
-
-Someone sees FreshOS for the first time. They zoom out and see every workspace alive simultaneously — each one rendering, each one independent, the GPU compositing all of them without effort. They dive into the introspection workspace and see every message in the system flowing in real-time — input events, compositor frames, service heartbeats, all visible, all alive. The latency counter sits in the corner, rock-steady, proving the system keeps its promises.
-
-That's FreshOS. Everything else is what happens after that moment lands.
-
----
-
-## Success Criteria
-
-v1 is done when:
-
-- The kernel boots on real hardware (not just QEMU)
-- Two or more userspace processes exchange typed messages
-- IPC round-trip is measurably sub-microsecond
-- The compositor renders spatial workspaces with GPU acceleration
-- Zooming out shows all workspaces running live simultaneously
-- The message-flow visualisation renders live system activity
-- The latency counter is visible and stays within the guarantee
-- A three-line script can connect two services through the message layer
-- A non-technical person watching the demo says "how does that work?" and the answer is obvious once explained
-
-That last criterion is the only one that actually matters.
-
----
-
-*FreshOS v1 Scope — March 2026*
+*FreshOS v1 Scope v2 — September 2026. Replaces the March 2026 demo-first
+scope, which defined v1 as "not a daily driver" (see decisions 0002 and
+0003).*
 *Steve*

@@ -6,6 +6,11 @@ date: 2026-04-13
 
 # Roadmap From FreshOS Demo to Useful OS
 
+> **September 2026:** the order of work is now set by the v1 ladder in
+> `docs/FreshOS-v1-Scope.md`. M1–M7 below still describe the substrate for its
+> first three rungs. x86_64 was dropped (decision 0003), and the Raspberry Pi 4
+> on bare metal is the strict isolation path.
+
 ## What "Useful" Means
 
 For FreshOS, "useful" should mean:
@@ -46,7 +51,7 @@ Checkpoint A should come first. Checkpoint B must follow quickly so the project 
 ## Ground Rules
 
 - Keep `aarch64 + HVF` as the fast iteration and demo path.
-- Keep `x86_64` as the reference path for strict isolation until ARM can prove the same thing.
+- Use the Raspberry Pi 4 on bare metal as the strict isolation path. HVF's `tlbi` trap does not apply there.
 - Prefer boring formats and protocols over invention: `ELF`, a simple block device, and a simple filesystem.
 - Every milestone must end with a concrete demo, not just internal refactoring.
 - Avoid major new UI work until process, storage, and service lifecycle are solid.
@@ -209,9 +214,8 @@ That is enough to justify calling it a small but real operating system.
 
 **Tasks:**
 
-- Choose the truth path for strict isolation.
-- Near-term, that is probably still `x86_64`.
-- Keep ARM/HVF as accelerated mode until per-task `TTBR0` switching is proven.
+- Use the Raspberry Pi 4 on bare metal as the truth path for strict isolation.
+- Keep QEMU with HVF as the accelerated development mode.
 - Run at least shell plus one sibling service in real isolated userspace on the truth path.
 - Unify exit reasons and supervision across EL0/ring 3 faults.
 - Add tests for:
@@ -238,7 +242,7 @@ That is enough to justify calling it a small but real operating system.
 
 - Produce one bootable disk image with kernel, init, services, and root filesystem.
 - Add a single build command for the primary demo path.
-- Add a second command for the strict reference path.
+- Add a command that writes a bootable Pi 4 SD card image.
 - Seed the image with sample files and service config.
 - Add smoke tests for boot, service launch, file persistence, and restart behavior.
 - Document the expected boot flows.
