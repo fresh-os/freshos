@@ -1,14 +1,14 @@
 ---
 title: "0001 — \"Useful\" means observable"
 type: decision
-status: accepted
+status: superseded-in-part
 date: 2026-06-13
 deciders: Steve
 ---
 
 # 0001 — "Useful" means observable
 
-- **Status:** Accepted
+- **Status:** Superseded in part by [0002](0002-daily-driver-is-the-destination.md). Its rejection of the daily driver no longer holds; its observability thinking stands until 0002's open questions are settled.
 - **Date:** 2026-06-13
 - **Deciders:** Steve
 
