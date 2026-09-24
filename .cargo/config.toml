@@ -1,7 +1,6 @@
 [build]
-# Apple Silicon/HVF is the primary demo path for day-to-day development.
-# The x86_64 path remains the architecture reference path and is invoked
-# explicitly by run.sh.
+# aarch64 is the only architecture (decision 0003). QEMU virt + HVF on
+# Apple Silicon is the day-to-day development loop.
 target = "aarch64-unknown-uefi"
 
 [unstable]

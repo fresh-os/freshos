@@ -26,12 +26,18 @@ userspace `virtio-input` driver (plus `-device virtio-keyboard-device` in
 `run-arm.sh`) turns FreshOS from a thing you watch into a thing you use, and
 unblocks GUI-driven demoing. Well-scoped; the natural next session.
 
+**Direction changed — 24 September 2026.** Decision 0002 makes a daily driver the long-term
+destination (partly superseding 0001). Decision 0003 makes the **Raspberry Pi 4** the
+reference hardware and drops x86_64; its code is gone and its lessons are in
+`docs/x86-lessons.md`. The first Pi milestone is serial output on a real Pi 4. #63 still
+stands, because it serves both the demo and the daily driver.
+
 **Also open:** #65 (stats overlay flickers over the dashboard — compositor
 z-order), and the rest of ★ Observable — always-on latency counter, visible
 capability graph, per-message inspection, time-travel replay.
 
-> The sections below predate this status block and describe the April state; the
-> architecture narrative still holds, but treat specifics as historical.
+> The sections below predate this status block and describe the April state,
+> including the now-removed x86_64 path. Treat them as historical.
 
 ---
 

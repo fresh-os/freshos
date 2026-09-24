@@ -1,5 +1,7 @@
 # FreshOS Boot Walkthrough
 
+> **Historical (x86_64).** x86_64 support was removed under decision 0003. This document describes the removed x86 path. Its lessons for the aarch64 rebuild are in [`x86-lessons.md`](x86-lessons.md).
+
 A step-by-step explanation of what happens from power-on to ping-pong, written for someone with no bare-metal programming experience.
 
 ---

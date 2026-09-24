@@ -1,49 +1,46 @@
 # FreshOS
 
-A microkernel operating system written in Rust, targeting x86_64 / UEFI.
+A microkernel operating system written in Rust, targeting aarch64 / UEFI. The reference hardware is the Raspberry Pi 4.
 
 The guiding thesis is **understandable magic**: the system should be perceptible to the person using it — small enough to hold in your head, with the interesting parts on the surface rather than buried under abstraction. The full vision is in [`docs/FreshOS-Manifesto.md`](docs/FreshOS-Manifesto.md).
 
 ## What works today
 
-FreshOS boots on QEMU and on real UEFI hardware, and:
+FreshOS boots in QEMU (`virt` machine, HVF acceleration on Apple Silicon), and:
 
-- runs user-mode tasks in **ring 3** with **per-process page tables** — each task sees only its own code, stack, and explicitly granted resources;
-- passes messages through **typed, bounded IPC channels** delivered as syscalls — no direct kernel calls from user mode;
-- preempts via a **PIT timer at 100 Hz**, with an assembly context switch;
-- runs a **userspace keyboard driver** and a **graphical shell** that renders straight to the framebuffer.
+- loads its services (`init`, `pong`, `pulse`, `fault`) as **separate ELF files** from the boot disk. `init` supervises them and restarts them if they crash;
+- passes messages through **typed, bounded IPC channels**, recording every message in a trace buffer;
+- runs a **composited desktop**: a shell, and a dashboard that draws the live message flow between tasks as it happens;
+- preempts tasks on a **1000 Hz timer**, with an assembly context switch.
 
-The kernel handles scheduling, memory, IPC, and interrupt routing. Everything else — drivers included — lives in userspace. The kernel reads port `0x60` and forwards a raw scancode as an IPC message; it doesn't know what a keyboard is.
+The desktop still runs at EL1, because QEMU's HVF acceleration traps the TLB-maintenance instructions that per-task page tables need. Real per-task isolation at EL0 is the next major piece of work, on real hardware. Input currently arrives over the serial console.
 
 ## Build and run
 
-Requires Rust nightly (pinned by `rust-toolchain.toml`) and QEMU with OVMF.
+Requires an Apple Silicon Mac, Rust nightly (pinned by `rust-toolchain.toml`) and QEMU (`brew install qemu`).
 
 ```bash
-# Build the kernel
-RUSTUP_TOOLCHAIN=nightly cargo build --package freshos-kernel
-
-# Build and boot in QEMU (VNC on localhost:5900)
-./run.sh
+# Build the kernel and services, then boot in QEMU (serial on stdio)
+./run-arm.sh
 
 # Release build
-./run.sh --release
+./run-arm.sh --release
 ```
 
-UEFI firmware comes from `brew install qemu` (`edk2-x86_64-code.fd`); QEMU loads it via pflash, not `-bios`.
+QEMU loads the UEFI firmware (`edk2-aarch64-code.fd`) via pflash, not `-bios`.
 
 ## Architecture
 
-A fuller tour lives in [`docs/`](docs/) — the manifesto, the v1 scope, a beginner's boot walkthrough, and a syscall-flow analysis. In brief:
+A fuller tour lives in [`docs/`](docs/): the manifesto, the v1 scope, the current status, and the design decisions. In brief:
 
-- **Capability-style resource grants** through page-table mappings — the framebuffer is mapped into the shell's address space but not the keyboard driver's. The kernel decides who sees what.
-- **syscall/sysret** for the user–kernel boundary, configured through the `IA32_STAR` / `LSTAR` / `FMASK` MSRs.
-- **2 MiB huge-page** identity mapping, with per-task page directories overriding the shared kernel ones for regions that need user access.
-- **Blocking IPC** that disables interrupts before the empty-check to avoid a race, then sleeps with `sti; hlt`; the keyboard IRQ wakes a blocked task immediately, without waiting for the next timer tick.
+- **The kernel handles scheduling, memory, IPC and interrupt routing.** Everything else is meant to live in userspace services.
+- **Services are ELF files** that the kernel loads from the EFI system partition and spawns under a supervisor.
+- **Every message is observable.** The kernel attributes each message to a named sender and receiver, and the dashboard draws the traffic live.
+- **x86_64 was dropped** in favour of aarch64 (decision 0003). The design lessons from its ring-3 isolation work are in [`docs/x86-lessons.md`](docs/x86-lessons.md).
 
 ## Performance contracts
 
-The manifesto sets hard targets, not aspirations — sub-5 ms input-to-photon, sub-1 µs IPC round-trip, zero compositor frame misses. The syscall path (~200–500 ns on real hardware) already meets the IPC target; scheduling latency at 100 Hz does not yet meet input-to-photon. The analysis is in [`docs/Syscall-Flow.md`](docs/Syscall-Flow.md).
+The manifesto sets hard targets, not aspirations — sub-5 ms input-to-photon, sub-1 µs IPC round-trip, zero compositor frame misses. None of these has been measured on real hardware yet. The Raspberry Pi 4 is where they will be.
 
 ## Status
 

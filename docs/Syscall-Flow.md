@@ -1,5 +1,7 @@
 # FreshOS Syscall Flow
 
+> **Historical (x86_64).** x86_64 support was removed under decision 0003. This document describes the removed x86 path. Its lessons for the aarch64 rebuild are in [`x86-lessons.md`](x86-lessons.md).
+
 How user-mode tasks talk to the kernel, and what "ring 3" actually means.
 
 ---
