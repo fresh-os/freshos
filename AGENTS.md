@@ -94,7 +94,8 @@ The spawn dispatch in `init_abi.rs` calls `task_names::register`. That call give
 
 ## Gotchas
 
-- **Both boards use GICv2** (QEMU under HVF gives v2, not v3; the Pi 4 has a GIC-400). The timer is the **virtual** timer, PPI INTID 27, and its frequency is read from `CNTFRQ_EL0`, so neither is board-specific.
+- **The boards have different GICs.** QEMU 11 under HVF offers only a GICv3 (it refuses `gic-version=2` with "HVF does not support GICv2 emulation"; older QEMU gave v2). The Pi 4 has a GIC-400, which is v2. `gic.rs` drives both, chosen by `board::GIC`. **The tell** that the GIC and the machine disagree: the boot log stops at "Scheduler started", and the QEMU monitor shows the CPU idling in `wfi` with IRQs unmasked.
+- The timer is the **virtual** timer, PPI INTID 27, and its frequency is read from `CNTFRQ_EL0`, so neither is board-specific.
 - **The Pi 4 addresses in `board/rpi4.rs` are unverified on hardware.** The kernel also relies on the firmware having initialised the PL011; it never sets the baud rate itself.
 - **Edition 2024:**
   - An `unsafe fn` body needs explicit `unsafe {}` blocks.

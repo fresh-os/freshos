@@ -31,3 +31,14 @@ pub struct VirtioMmio {
     pub stride: usize,
     pub slots: usize,
 }
+
+/// Which interrupt controller a board has, and where.
+// Each board builds only its own variant, so the other always looks unused.
+#[allow(dead_code)]
+pub enum Gic {
+    /// GICv2: memory-mapped distributor and CPU interface.
+    V2 { gicd: usize, gicc: usize },
+    /// GICv3: distributor plus a redistributor per CPU; the CPU interface is
+    /// the ICC_* system registers.
+    V3 { gicd: usize, gicr: usize },
+}
