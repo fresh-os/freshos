@@ -20,7 +20,18 @@ receiver. Nodes are labelled from a kernel-owned task-name registry
 composited to **ramfb**, because the virtio-GPU scanout is invisible under
 `-display cocoa`.
 
-**▶ Next action: rung 1 starts with serial output on a real Pi 4.**
+**⏸ Parked — 25 September 2026.** Paused for now, to be picked up soon. There is
+no Pi 4 on hand yet: the boards available are a Pi 5, a Pi 2B and a Pi 1, none
+of which is the reference hardware (0003). A Raspberry Pi Pico is available to
+act as the serial adapter, flashed with Raspberry Pi's `debugprobe` firmware:
+GP4 (TX) goes to Pi header pin 10, GP5 (RX) to pin 8, and GND to GND.
+
+**To unpark,** either buy a Pi 4 and follow the steps below, or start with the
+work that doesn't need the board: the board layer (step 4, which must land
+before the first Pi boot anyway, because the kernel's QEMU UART address is
+ordinary RAM on a Pi 4) and the read-only MCP bridge over QEMU serial (0005).
+
+**▶ Next action when unparked: rung 1 starts with serial output on a real Pi 4.**
 
 1. Put the community `pftf/RPi4` UEFI firmware on an SD card and copy the
    contents of `esp-arm/` onto it.
