@@ -1,4 +1,5 @@
-/// aarch64 architecture backend — QEMU virt with HVF.
+/// aarch64 architecture backend. Board-specific addresses live in `board`.
+pub mod board;
 pub mod context;
 pub mod exceptions;
 pub mod gic;
@@ -7,9 +8,9 @@ pub mod syscall;
 pub mod timer;
 pub mod virtio_gpu;
 
-/// Write a byte to PL011 UART at 0x0900_0000 (QEMU virt).
+/// Write a byte to the board's PL011 UART.
 pub fn serial_write_byte(byte: u8) {
-    const PL011_BASE: usize = 0x0900_0000;
+    const PL011_BASE: usize = board::PL011_BASE;
     const UARTDR: *mut u32 = PL011_BASE as *mut u32;
     const UARTFR: *const u32 = (PL011_BASE + 0x18) as *const u32;
     unsafe {
@@ -24,7 +25,7 @@ pub fn serial_write_byte(byte: u8) {
 /// Try to read a byte from PL011 UART RX. Returns `Some(byte)` if data
 /// is available, `None` if the RX FIFO is empty.
 pub fn serial_try_read() -> Option<u8> {
-    const PL011_BASE: usize = 0x0900_0000;
+    const PL011_BASE: usize = board::PL011_BASE;
     const UARTDR: *const u32 = PL011_BASE as *const u32;
     const UARTFR: *const u32 = (PL011_BASE + 0x18) as *const u32;
     unsafe {

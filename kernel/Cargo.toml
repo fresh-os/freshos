@@ -3,6 +3,12 @@ name = "freshos-kernel"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["board-qemu-virt"]
+# Exactly one board must be selected (see kernel/src/arch/aarch64/board/).
+board-qemu-virt = []
+board-rpi4 = []
+
 [dependencies]
 uefi = "0.33"
 rhai = { version = "1.24", default-features = false, features = ["no_std", "no_float", "only_i64", "no_module", "no_closure", "unchecked"] }

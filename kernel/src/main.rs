@@ -269,6 +269,7 @@ fn main() -> Status {
 
     // ---- Kernel init ----
     serial_println!("FreshOS booting on aarch64...");
+    serial_println!("  Board: {}", arch::board::NAME);
     serial_println!("  Serial: PL011 UART");
 
     unsafe { arch::exceptions::init() };

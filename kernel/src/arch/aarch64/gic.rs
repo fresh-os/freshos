@@ -1,20 +1,18 @@
-/// GICv2 driver for QEMU virt machine under HVF.
+/// GICv2 driver.
 ///
-/// QEMU virt with HVF defaults to GICv2 (not GICv3). GICv2 has no ICC_*
-/// system registers — the CPU interface is memory-mapped at GICC.
-///
-/// QEMU virt GICv2 memory map:
-///   GICD: 0x0800_0000 (distributor)
-///   GICC: 0x0801_0000 (CPU interface)
+/// Both supported boards use GICv2: QEMU virt under HVF (not GICv3) and the
+/// Pi 4's GIC-400. GICv2 has no ICC_* system registers — the CPU interface is
+/// memory-mapped at GICC. The addresses come from the board layer.
+use super::board;
 use crate::serial::serial_println;
 
 // GICD — distributor
-const GICD_BASE: usize = 0x0800_0000;
+const GICD_BASE: usize = board::GICD_BASE;
 const GICD_CTLR: *mut u32 = GICD_BASE as *mut u32;
 const GICD_ISENABLER0: *mut u32 = (GICD_BASE + 0x100) as *mut u32;
 
 // GICC — CPU interface (memory-mapped, GICv2)
-const GICC_BASE: usize = 0x0801_0000;
+const GICC_BASE: usize = board::GICC_BASE;
 const GICC_CTLR: *mut u32 = GICC_BASE as *mut u32;
 const GICC_PMR: *mut u32 = (GICC_BASE + 0x04) as *mut u32;
 const GICC_IAR: *const u32 = (GICC_BASE + 0x0C) as *const u32;

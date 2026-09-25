@@ -560,13 +560,14 @@ impl VirtioGpu {
 // ============================================================================
 
 fn probe_gpu() -> Option<usize> {
-    const MMIO_BASE: usize = 0x0a00_0000;
-    const MMIO_STRIDE: usize = 0x200;
     const VIRTIO_MAGIC: u32 = 0x7472_6976; // "virt"
     const GPU_DEVICE_ID: u32 = 16;
 
-    for slot in 0..32 {
-        let base = MMIO_BASE + slot * MMIO_STRIDE;
+    // Boards without virtio-mmio (real hardware) never probe: on a Pi 4 the
+    // QEMU window is ordinary RAM.
+    let mmio = super::board::VIRTIO_MMIO.as_ref()?;
+    for slot in 0..mmio.slots {
+        let base = mmio.base + slot * mmio.stride;
         let magic = read32(base, MAGIC_VALUE);
         if magic != VIRTIO_MAGIC {
             continue;

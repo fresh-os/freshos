@@ -20,30 +20,31 @@ receiver. Nodes are labelled from a kernel-owned task-name registry
 composited to **ramfb**, because the virtio-GPU scanout is invisible under
 `-display cocoa`.
 
-**⏸ Parked — 25 September 2026.** Paused for now, to be picked up soon. There is
-no Pi 4 on hand yet: the boards available are a Pi 5, a Pi 2B and a Pi 1, none
-of which is the reference hardware (0003). A Raspberry Pi Pico is available to
-act as the serial adapter, flashed with Raspberry Pi's `debugprobe` firmware:
-GP4 (TX) goes to Pi header pin 10, GP5 (RX) to pin 8, and GND to GND.
+**Working QEMU-first — 25 September 2026.** There is no Pi 4 on hand yet (the
+boards available are a Pi 5, a Pi 2B and a Pi 1), so work that doesn't need the
+board comes first.
 
-**To unpark,** either buy a Pi 4 and follow the steps below, or start with the
-work that doesn't need the board: the board layer (step 4, which must land
-before the first Pi boot anyway, because the kernel's QEMU UART address is
-ordinary RAM on a Pi 4) and the read-only MCP bridge over QEMU serial (0005).
+**Done:** the board layer (`kernel/src/arch/aarch64/board/`). QEMU `virt` and the
+Pi 4 now differ only in one file of addresses each, selected by a cargo feature.
+The Pi 4 addresses (PL011 at `0xFE20_1000`, GIC-400 at `0xFF84_1000` and
+`0xFF84_2000`) come from the BCM2711 peripherals document and are not yet
+verified on hardware.
 
-**▶ Next action when unparked: rung 1 starts with serial output on a real Pi 4.**
+**▶ Next on QEMU:** the read-only MCP bridge over serial (decision 0005).
 
-1. Put the community `pftf/RPi4` UEFI firmware on an SD card and copy the
-   contents of `esp-arm/` onto it.
-2. Wire a serial adapter to the UART on GPIO 14/15 (header pins 8 and 10).
-   The firmware prints to serial itself, which proves the wiring before
-   FreshOS runs. Check which UART the firmware routes to those pins.
-3. Boot FreshOS and note where it stops. It will stop early, because the
-   kernel hardcodes QEMU `virt` addresses: the PL011 UART at `0x0900_0000`
-   and the GIC at `0x0800_0000`. On the Pi 4 they are around `0xFE20_1000`
-   and `0xFF84_1000`; confirm against the BCM2711 peripherals document.
-4. Introduce the board layer under `arch/aarch64/` (0003), so QEMU `virt` and
-   the Pi 4 differ only in addresses and drivers.
+**▶ Then, on a real Pi 4 (rung 1):**
+
+1. Build the kernel for the Pi:
+   `rustup run nightly cargo build --package freshos-kernel --target aarch64-unknown-uefi --no-default-features --features board-rpi4`.
+   There is no Pi staging script yet: copy the kernel to `EFI/BOOT/BOOTAA64.EFI`
+   and the service ELFs to `EFI/FreshOS/`, as `run-arm.sh` does for `esp-arm/`.
+2. Put the community `pftf/RPi4` UEFI firmware on an SD card with those files,
+   and add `dtoverlay=disable-bt` to `config.txt` so the PL011 is on GPIO 14/15.
+3. Wire the serial adapter: a Raspberry Pi Pico flashed with `debugprobe`,
+   GP4 (TX) to Pi header pin 10, GP5 (RX) to pin 8, GND to GND. The firmware
+   prints to serial itself, which proves the wiring before FreshOS runs.
+4. Boot FreshOS and note where it stops. The first log lines should read
+   `Board: Raspberry Pi 4`.
 
 **Parked:** #63 (a `virtio-input` keyboard driver). It only helps QEMU, and rung 1
 is the Pi. On the Pi, input will come from USB. #65 (the stats overlay flickers

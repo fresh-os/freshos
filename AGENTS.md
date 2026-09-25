@@ -8,7 +8,7 @@ FreshOS is a Rust microkernel that boots from UEFI on **aarch64**. Its guiding i
 
 **Strategic direction (binding):** `docs/decisions/0002-daily-driver-is-the-destination.md` (proposed). In the long term, FreshOS should become an OS people can really use day to day. 0002 partly supersedes `0001-useful-means-observable.md`: 0001's rejection of the daily driver no longer holds, but its observability milestones (**★ Observable by Default**, **★ First Living Citizen**) stand until 0002's open questions are settled. The M1–M7 substrate roadmap (`docs/plans/2026-04-13-useful-os-roadmap.md`) is the route to the destination again. Treat shortcuts that block real use, such as the EL1 desktop without isolation, as temporary. The order of work is the v1 ladder in `docs/FreshOS-v1-Scope.md` (honest kernel on the Pi 4, storage, usable desktop, basic games, networking, web). Don't start a later rung while an earlier one is unfinished. **Responsiveness and observability are the twin goals:** new work must be visible in the message-flow view and measurable against the performance contracts below. FreshOS never builds a browser engine and never targets POSIX compatibility. Emu198x and the other 198x projects run natively via `no_std` + `alloc` cores, not a `std` port or a Linux VM (`docs/decisions/0004-198x-projects-run-natively.md`); changes to a 198x repo's structure are decided in that repo, not from FreshOS work. The OS is reachable by agents over MCP through a bridge service that holds capabilities like any other service, never a backdoor (`docs/decisions/0005-reachable-over-mcp.md`). Long-range ideas (editions, the physical world) live in `docs/FreshOS-Horizon.md` and are out of scope. Existing code has no protected status: rewriting a subsystem is allowed, but decide it one subsystem at a time and record the reason. Check 0002's *Drift triggers*.
 
-**Target hardware (binding):** `docs/decisions/0003-raspberry-pi-4-base-drop-x86.md`. The **Raspberry Pi 4** is the reference hardware, booted through the `pftf/RPi4` UEFI firmware. QEMU `virt` with HVF is the development loop, and the Pi 5 comes next. **x86_64 has been dropped. Don't reintroduce it.** Its design lessons (isolation model, syscall boundary, known gaps) are in `docs/x86-lessons.md`. Keep board-specific addresses (UART, GIC, timer, framebuffer, memory map) behind a board layer under `arch/aarch64/` rather than hardcoding QEMU `virt` values.
+**Target hardware (binding):** `docs/decisions/0003-raspberry-pi-4-base-drop-x86.md`. The **Raspberry Pi 4** is the reference hardware, booted through the `pftf/RPi4` UEFI firmware. QEMU `virt` with HVF is the development loop, and the Pi 5 comes next. **x86_64 has been dropped. Don't reintroduce it.** Its design lessons (isolation model, syscall boundary, known gaps) are in `docs/x86-lessons.md`. Board-specific addresses live in the board layer, `kernel/src/arch/aarch64/board/`, one file per board, never hardcoded elsewhere.
 
 **Where work stands:** read the status block at the top of `docs/Where-We-Are.md` (everything below it is April history). Work is tracked as GitHub issues and milestones on `fresh-os/freshos`.
 
@@ -36,6 +36,7 @@ The toolchain is nightly, pinned by `rust-toolchain.toml` (channel only, no date
 
 # Build one piece. Always pass both --package and --target, the way run-arm.sh does.
 rustup run nightly cargo build --package freshos-kernel --target aarch64-unknown-uefi
+rustup run nightly cargo build --package freshos-kernel --target aarch64-unknown-uefi --no-default-features --features board-rpi4   # Pi 4 kernel
 rustup run nightly cargo build --package freshos-pong   --target aarch64-unknown-none   # same for init, pulse, fault
 
 rustup run nightly cargo clippy --package freshos-kernel
@@ -54,6 +55,7 @@ rustup run nightly cargo clippy --package freshos-kernel
   - `scripting` (Rhai, `no_std`)
   - `elf`, `init_abi` and `service_abi`, used by the service loader
   - `arm_tasks`, the desktop
+- **`kernel/src/arch/aarch64/board/`:** the board layer. One file per board (`qemu_virt.rs`, `rpi4.rs`) holding its addresses: PL011 UART, GIC, and the virtio-mmio window if any. Exactly one `board-*` cargo feature selects it (`board-qemu-virt` is the default), and `compile_error!` rejects zero or two.
 - **`kernel/src/arch/aarch64/`:** exceptions, GIC, timer, context switch and scheduler, paging, syscalls and a virtio-GPU driver. It is re-exported as `arch::*`, and portable code calls through `arch::`.
 - **`main.rs`:** the UEFI `#[entry]`. It picks the largest graphics mode up to 1920×1200, loads the service ELFs from the ESP, exits boot services, then brings up the kernel and starts the scheduler.
 
@@ -92,11 +94,8 @@ The spawn dispatch in `init_abi.rs` calls `task_names::register`. That call give
 
 ## Gotchas
 
-- **QEMU `virt` addresses:**
-  - GICv2 (not v3): GICD at `0x0800_0000`, GICC at `0x0801_0000`.
-  - The timer is the **virtual** timer, PPI INTID 27.
-  - PL011 UART at `0x0900_0000`.
-  - The Pi 4 uses different addresses, so these belong behind the board layer.
+- **Both boards use GICv2** (QEMU under HVF gives v2, not v3; the Pi 4 has a GIC-400). The timer is the **virtual** timer, PPI INTID 27, and its frequency is read from `CNTFRQ_EL0`, so neither is board-specific.
+- **The Pi 4 addresses in `board/rpi4.rs` are unverified on hardware.** The kernel also relies on the firmware having initialised the PL011; it never sets the baud rate itself.
 - **Edition 2024:**
   - An `unsafe fn` body needs explicit `unsafe {}` blocks.
   - Access `static mut` through `addr_of_mut!`, because `static_mut_refs` denies by default.
