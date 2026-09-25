@@ -49,6 +49,32 @@ pub fn interrupt_enable() {
     unsafe { core::arch::asm!("msr DAIFClr, #0x2", options(nomem, nostack)) };
 }
 
+/// Masks IRQs until dropped, then restores the previous mask.
+///
+/// FreshOS runs on one CPU, so this is a sufficient lock for state shared
+/// between preemptible tasks. Nesting is safe: an inner guard restores the
+/// mask the outer guard set.
+pub struct IrqGuard(u64);
+
+impl IrqGuard {
+    #[inline(always)]
+    pub fn mask() -> Self {
+        let daif: u64;
+        unsafe {
+            core::arch::asm!("mrs {}, DAIF", out(reg) daif, options(nomem, nostack));
+            core::arch::asm!("msr DAIFSet, #0x2", options(nomem, nostack));
+        }
+        IrqGuard(daif)
+    }
+}
+
+impl Drop for IrqGuard {
+    #[inline(always)]
+    fn drop(&mut self) {
+        unsafe { core::arch::asm!("msr DAIF, {}", in(reg) self.0, options(nomem, nostack)) };
+    }
+}
+
 /// Wait for interrupt.
 #[inline(always)]
 pub fn halt() {

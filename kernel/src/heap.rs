@@ -8,6 +8,10 @@
 /// adjacent blocks are merged to reduce fragmentation. On alloc, first-fit
 /// is used.
 ///
+/// Tasks are preemptible, so every heap operation runs with IRQs masked
+/// (`arch::IrqGuard`); otherwise a timer tick mid-operation could let another
+/// task walk a half-updated free list.
+///
 /// Not the fastest allocator, but correct and simple. A slab allocator
 /// or buddy system can replace it later when allocation pressure warrants.
 use core::alloc::{GlobalAlloc, Layout};
@@ -95,6 +99,7 @@ pub fn total() -> usize {
 
 unsafe impl GlobalAlloc for LockedHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let _irq = crate::arch::IrqGuard::mask();
         let inner = unsafe { &mut *self.0.get() };
         let size = align_up(layout.size().max(MIN_BLOCK), BLOCK_ALIGN);
 
@@ -142,6 +147,7 @@ unsafe impl GlobalAlloc for LockedHeap {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        let _irq = crate::arch::IrqGuard::mask();
         let inner = unsafe { &mut *self.0.get() };
         let size = align_up(layout.size().max(MIN_BLOCK), BLOCK_ALIGN);
 
