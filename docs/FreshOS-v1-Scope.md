@@ -27,8 +27,9 @@ Each rung ends with a demo on a real Pi 4.
    Demo: edit a file, kill the editor, restart it, carry on.
 4. **Plays.** Audio output, gamepad input, frame pacing, and a native game
    SDK on a shared ABI crate. Games install by copying to the SD card.
-   Demo: a basic game built outside the kernel repo runs at a steady frame
-   rate, with its messages visible in the flow view.
+   Demo: Emu198x runs a classic game natively at a steady frame rate, its
+   trace visible in the flow view (decision 0004). Play198x runs alongside
+   it as the media player.
 5. **Connected.** Ethernet, then a first bridge service (email).
    Demo: read and send email.
 6. **Browses.** Web content through an embedded renderer (Servo) or a

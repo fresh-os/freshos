@@ -33,6 +33,9 @@ to choose it over any other daily driver:
 
 A daily driver that gives up either one is not FreshOS.
 
+★ First Living Citizen is answered by 0004: Emu198x and the other 198x
+projects run natively on FreshOS.
+
 ## Why
 
 An OS that nobody can ever really use is pointless, however observable it is.
@@ -60,10 +63,6 @@ destination is legitimate.
   duplicated desktop, hand-copied ABIs) that a daily driver cannot keep.
   Rewrites are still decided one subsystem at a time, with the reason
   recorded. "Start over" is not a default.
-
-## Open questions
-
-- What happens to ★ First Living Citizen?
 
 ## Drift triggers
 
