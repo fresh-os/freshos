@@ -1,41 +1,42 @@
 # FreshOS: Where We Are
 
-*April 2026 — last updated 13 June 2026*
+*April 2026 — last updated 25 September 2026*
 
-## Current status — 13 June 2026
+## Current status — 25 September 2026
 
-FreshOS now has a strategic anchor: **useful means observable**, not a daily
-driver (see `docs/decisions/0001-useful-means-observable.md`). Work is driven by
-two north-star milestones — **★ Observable by Default** and **★ First Living
-Citizen** — which the M1–M7 substrate exists to serve.
+**Direction.** A daily driver is the long-term destination (decision 0002), with
+**responsiveness and observability as twin goals**. The **Raspberry Pi 4** is the
+reference hardware and x86_64 is gone (0003; its lessons are in
+`docs/x86-lessons.md`). The 198x projects, starting with Emu198x, run natively
+via `no_std` + `alloc` cores (0004). The order of work is the v1 ladder in
+`docs/FreshOS-v1-Scope.md`.
 
-**Shipped:** the live message-flow diagram (OBS.1) on the aarch64 demo path. The
-dashboard renders tasks as nodes and recent messages as arcs with a pulse that
-travels sender → receiver. Identity is honest: nodes are labelled from a
-kernel-owned task-name registry (`kernel/src/task_names.rs`, named at the
-service-spawn dispatch in `init_abi.rs`), and destinations are attributed via
-channel consumers (`kernel/src/ipc.rs`) even when delivery was buffered. The
-desktop is composited to **ramfb** after the virtio-GPU scanout was found to be
-invisible under QEMU `-display cocoa` (`run-arm.sh`).
+**Shipped:** the live message-flow diagram (OBS.1) on QEMU. The dashboard renders
+tasks as nodes and recent messages as arcs with a pulse that travels sender →
+receiver. Nodes are labelled from a kernel-owned task-name registry
+(`kernel/src/task_names.rs`, named at the service-spawn dispatch in
+`init_abi.rs`), and destinations are attributed via channel consumers
+(`kernel/src/ipc.rs`) even when delivery was buffered. On QEMU the desktop is
+composited to **ramfb**, because the virtio-GPU scanout is invisible under
+`-display cocoa`.
 
-**▶ Next action — issue #63: a `virtio-input` GUI keyboard driver.** Today input
-only reaches the desktop through the serial UART (`keyboard_el1` polls
-`serial_try_read`), so the "interactive" demo cannot be driven from its own
-window — you can't switch workspaces or type into the shell from the GUI. A
-userspace `virtio-input` driver (plus `-device virtio-keyboard-device` in
-`run-arm.sh`) turns FreshOS from a thing you watch into a thing you use, and
-unblocks GUI-driven demoing. Well-scoped; the natural next session.
+**▶ Next action: rung 1 starts with serial output on a real Pi 4.**
 
-**Direction changed — 24 September 2026.** Decision 0002 makes a daily driver the long-term
-destination (partly superseding 0001). Decision 0003 makes the **Raspberry Pi 4** the
-reference hardware and drops x86_64; its code is gone and its lessons are in
-`docs/x86-lessons.md`. The goals are now the v1 ladder in `docs/FreshOS-v1-Scope.md`;
-its first step is serial output on a real Pi 4. #63 still
-stands, because it serves both the demo and the daily driver.
+1. Put the community `pftf/RPi4` UEFI firmware on an SD card and copy the
+   contents of `esp-arm/` onto it.
+2. Wire a serial adapter to the UART on GPIO 14/15 (header pins 8 and 10).
+   The firmware prints to serial itself, which proves the wiring before
+   FreshOS runs. Check which UART the firmware routes to those pins.
+3. Boot FreshOS and note where it stops. It will stop early, because the
+   kernel hardcodes QEMU `virt` addresses: the PL011 UART at `0x0900_0000`
+   and the GIC at `0x0800_0000`. On the Pi 4 they are around `0xFE20_1000`
+   and `0xFF84_1000`; confirm against the BCM2711 peripherals document.
+4. Introduce the board layer under `arch/aarch64/` (0003), so QEMU `virt` and
+   the Pi 4 differ only in addresses and drivers.
 
-**Also open:** #65 (stats overlay flickers over the dashboard — compositor
-z-order), and the rest of ★ Observable — always-on latency counter, visible
-capability graph, per-message inspection, time-travel replay.
+**Parked:** #63 (a `virtio-input` keyboard driver). It only helps QEMU, and rung 1
+is the Pi. On the Pi, input will come from USB. #65 (the stats overlay flickers
+over the dashboard: compositor z-order) is also open.
 
 > The sections below predate this status block and describe the April state,
 > including the now-removed x86_64 path. Treat them as historical.
