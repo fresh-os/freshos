@@ -15,7 +15,8 @@ the latency counter on screen and within contract.
 Each rung ends with a demo on a real Pi 4.
 
 1. **Honest kernel.** Boots to serial on the Pi 4, then runs tasks at EL0
-   with per-task page tables and validated syscall pointers.
+   with per-task page tables and validated syscall pointers. A read-only
+   MCP bridge over serial (decision 0005) supports the bring-up.
    Demo: a service faults and its siblings survive.
    *Decision gate:* benchmark software compositing at 1080p before rung 3.
    *Decision:* whether the kernel owns EL2 (needed for rung 6's Linux VM).

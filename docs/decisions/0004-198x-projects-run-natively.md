@@ -59,6 +59,11 @@ This answers 0002's open question about ★ First Living Citizen.
   dependencies of the ports above.
 - Until FreshOS has storage, ROMs and media are built into the binary as
   byte slices.
+- The 198x making tools should also run natively: Forge198x (code editing)
+  and Studio198x (graphics, sound, music, animation), over Asm198x and
+  Build198x. They come after rung 2, because making things means saving
+  them, and that is when the deferred `std` question gets answered. Their
+  shape is owned by their own decisions in the 198x repo.
 
 ## Drift triggers
 
