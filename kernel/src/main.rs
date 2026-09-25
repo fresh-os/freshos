@@ -25,6 +25,8 @@ mod arm_tasks;
 #[cfg(target_arch = "aarch64")]
 mod init_abi;
 #[cfg(target_arch = "aarch64")]
+mod mcp;
+#[cfg(target_arch = "aarch64")]
 mod service_abi;
 
 use frame_alloc::MemRegion;

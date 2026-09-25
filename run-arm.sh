@@ -45,7 +45,7 @@ if [ ! -f "$OVMF_VARS" ]; then
     cp "$OVMF_VARS_SRC" "$OVMF_VARS"
 fi
 
-echo ":: Launching QEMU aarch64 (HVF primary demo path, serial on stdio)..."
+echo ":: Launching QEMU aarch64 (HVF primary demo path, serial on stdio, MCP on mcp.sock)..."
 exec qemu-system-aarch64 \
     -machine virt,accel=hvf,highmem=off \
     -cpu host \
@@ -58,5 +58,6 @@ exec qemu-system-aarch64 \
     -device qemu-xhci \
     -device usb-kbd \
     -serial mon:stdio \
+    -serial unix:"$SCRIPT_DIR/mcp.sock",server=on,wait=off \
     -drive format=raw,file=fat:rw:"$SCRIPT_DIR/esp-arm" \
     "$@"

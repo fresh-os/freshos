@@ -14,6 +14,10 @@ pub const GIC: Gic = Gic::V3 {
     gicr: 0x080A_0000,
 };
 
+/// Second PL011, used by the MCP bridge (decision 0005). QEMU creates it when
+/// given a second `-serial` option, which `run-arm.sh` does.
+pub const MCP_UART_BASE: Option<usize> = Some(0x0904_0000);
+
 /// virtio-mmio transports, probed for the virtio-GPU.
 pub const VIRTIO_MMIO: Option<VirtioMmio> = Some(VirtioMmio {
     base: 0x0a00_0000,

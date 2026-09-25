@@ -12,6 +12,7 @@ pub const SERVICE_PING: u64 = 5;
 pub const SERVICE_PONG: u64 = 6;
 pub const SERVICE_PULSE: u64 = 7;
 pub const SERVICE_FAULT: u64 = 8;
+pub const SERVICE_MCP: u64 = 9;
 
 pub const SERVICE_FLAG_AUTOSTART: u64 = 1 << 0;
 pub const SERVICE_FLAG_SUPERVISED: u64 = 1 << 1;
@@ -22,7 +23,7 @@ pub const SERVICE_EXIT_NONE: u64 = 0;
 pub const SERVICE_EXIT_CLEAN: u64 = 1;
 pub const SERVICE_EXIT_FAULT: u64 = 2;
 
-const SERVICE_COUNT: usize = 8;
+const SERVICE_COUNT: usize = 9;
 const SERVICE_NAME_BYTES: usize = 16;
 
 #[repr(C)]
@@ -107,6 +108,10 @@ fn spawn_pulse_service() -> usize {
     }
 }
 
+fn spawn_mcp_service() -> usize {
+    arch::context::spawn(crate::mcp::bridge_el1)
+}
+
 fn spawn_fault_service() -> usize {
     if let (Some(entry), Some(user_stack)) = (
         crate::service_abi::external_fault_entry(),
@@ -175,6 +180,13 @@ static SERVICES: [ServiceDefinition; SERVICE_COUNT] = [
         restart_period_ticks: 200,
         spawn: spawn_fault_service,
     },
+    ServiceDefinition {
+        id: SERVICE_MCP,
+        name: "mcp",
+        flags: SERVICE_FLAG_AUTOSTART,
+        restart_period_ticks: 0,
+        spawn: spawn_mcp_service,
+    },
 ];
 
 static STARTED_SERVICES: AtomicU64 = AtomicU64::new(0);
@@ -198,7 +210,7 @@ fn service_bit(service_idx: usize) -> u64 {
     1u64 << service_idx
 }
 
-fn exit_reason_name(reason: u64) -> &'static str {
+pub(crate) fn exit_reason_name(reason: u64) -> &'static str {
     match reason {
         SERVICE_EXIT_CLEAN => "clean",
         SERVICE_EXIT_FAULT => "fault",

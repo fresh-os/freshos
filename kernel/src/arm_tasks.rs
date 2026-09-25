@@ -763,7 +763,7 @@ const FLOW_PALETTE: [Color; 6] = [
     Color::new(0xD2, 0xA8, 0xFF),
 ];
 
-fn tag_label(tag: u16) -> &'static str {
+pub(crate) fn tag_label(tag: u16) -> &'static str {
     match tag as u32 {
         ipc::MSG_IRQ => "IRQ",
         ipc::MSG_KEY_DOWN => "KEY",

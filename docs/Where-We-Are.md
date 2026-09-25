@@ -30,7 +30,18 @@ The Pi 4 addresses (PL011 at `0xFE20_1000`, GIC-400 at `0xFF84_1000` and
 `0xFF84_2000`) come from the BCM2711 peripherals document and are not yet
 verified on hardware.
 
-**▶ Next on QEMU:** the read-only MCP bridge over serial (decision 0005).
+**Done:** the read-only MCP bridge (decision 0005, `kernel/src/mcp.rs`). While
+QEMU runs, any MCP client can connect with `nc -U mcp.sock` and read the system
+summary, services, tasks, message trace and metrics.
+
+**Fixed:** Homebrew's QEMU 11.1.1 gives HVF a GICv3 and refuses GICv2, so the
+kernel's GICv2-only driver received no timer interrupts and no service ever ran
+after "Scheduler started". `gic.rs` now drives GICv3 on QEMU and GICv2 on the
+Pi 4.
+
+**Worth a look:** with everything running, the metrics show a frame taking about
+13 ms and an IPC round trip about 14.5 ms, against the manifesto's sub-1 µs IPC
+contract. Measure on real hardware before reading much into QEMU numbers.
 
 **▶ Then, on a real Pi 4 (rung 1):**
 

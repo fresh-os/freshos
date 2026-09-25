@@ -34,6 +34,10 @@ The toolchain is nightly, pinned by `rust-toolchain.toml` (channel only, no date
 ./run-demo.sh               # Same as run-arm.sh; exits with an error on hosts other than Apple Silicon
 ./run-arm.sh -display none  # Headless: extra arguments go to QEMU, and the last -display wins
 
+# While QEMU runs, the read-only MCP bridge is on mcp.sock in the repo root.
+# Any MCP client can use `nc -U` as its server command, for example:
+claude mcp add freshos -- nc -U "$PWD/mcp.sock"
+
 # Build one piece. Always pass both --package and --target, the way run-arm.sh does.
 rustup run nightly cargo build --package freshos-kernel --target aarch64-unknown-uefi
 rustup run nightly cargo build --package freshos-kernel --target aarch64-unknown-uefi --no-default-features --features board-rpi4   # Pi 4 kernel
@@ -79,6 +83,10 @@ To add a service, touch all of these:
 - a `SERVICE_*` id and record in `init_abi.rs`
 
 The spawn dispatch in `init_abi.rs` calls `task_names::register`. That call gives the task the name the flow view shows.
+
+### MCP bridge (`kernel/src/mcp.rs`)
+
+A built-in service, `mcp`, that speaks MCP's stdio transport (newline-delimited JSON-RPC) over the board's second PL011 UART (`board::MCP_UART_BASE`; QEMU only for now). `run-arm.sh` exposes that UART as `mcp.sock`. It offers five read-only views, each as a tool and as a resource at `freshos://<name>`: `system`, `services`, `tasks`, `message_trace` and `metrics`. Decision 0005 governs it: no write tools until capabilities exist, and never a path around them. It currently runs at EL1 and reads kernel state directly, like the rest of the desktop on this path.
 
 ### IPC and observability
 

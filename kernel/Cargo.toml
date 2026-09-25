@@ -11,4 +11,6 @@ board-rpi4 = []
 
 [dependencies]
 uefi = "0.33"
+# JSON-RPC for the MCP bridge (decision 0005); no_std with alloc.
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
 rhai = { version = "1.24", default-features = false, features = ["no_std", "no_float", "only_i64", "no_module", "no_closure", "unchecked"] }

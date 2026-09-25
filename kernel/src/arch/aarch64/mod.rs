@@ -8,33 +8,55 @@ pub mod syscall;
 pub mod timer;
 pub mod virtio_gpu;
 
-/// Write a byte to the board's PL011 UART.
-pub fn serial_write_byte(byte: u8) {
-    const PL011_BASE: usize = board::PL011_BASE;
-    const UARTDR: *mut u32 = PL011_BASE as *mut u32;
-    const UARTFR: *const u32 = (PL011_BASE + 0x18) as *const u32;
+// PL011 register offsets.
+const UARTDR: usize = 0x00;
+const UARTFR: usize = 0x18;
+const UARTLCR_H: usize = 0x2C;
+const UARTCR: usize = 0x30;
+
+/// Write a byte to the PL011 UART at `base`, waiting while the TX FIFO is full.
+pub fn pl011_write_byte(base: usize, byte: u8) {
     unsafe {
         // Wait for TX FIFO not full (bit 5 of FR)
-        while core::ptr::read_volatile(UARTFR) & (1 << 5) != 0 {
+        while core::ptr::read_volatile((base + UARTFR) as *const u32) & (1 << 5) != 0 {
             core::hint::spin_loop();
         }
-        core::ptr::write_volatile(UARTDR, byte as u32);
+        core::ptr::write_volatile((base + UARTDR) as *mut u32, byte as u32);
     }
 }
 
-/// Try to read a byte from PL011 UART RX. Returns `Some(byte)` if data
-/// is available, `None` if the RX FIFO is empty.
-pub fn serial_try_read() -> Option<u8> {
-    const PL011_BASE: usize = board::PL011_BASE;
-    const UARTDR: *const u32 = PL011_BASE as *const u32;
-    const UARTFR: *const u32 = (PL011_BASE + 0x18) as *const u32;
+/// Try to read a byte from the PL011 UART at `base`. Returns `Some(byte)` if
+/// data is available, `None` if the RX FIFO is empty.
+pub fn pl011_try_read(base: usize) -> Option<u8> {
     unsafe {
         // RXFE (bit 4) = 1 means RX FIFO empty
-        if core::ptr::read_volatile(UARTFR) & (1 << 4) != 0 {
+        if core::ptr::read_volatile((base + UARTFR) as *const u32) & (1 << 4) != 0 {
             return None;
         }
-        Some((core::ptr::read_volatile(UARTDR) & 0xFF) as u8)
+        Some((core::ptr::read_volatile((base + UARTDR) as *const u32) & 0xFF) as u8)
     }
+}
+
+/// Enable a PL011 the firmware didn't set up: 8n1 with FIFOs, TX and RX on.
+///
+/// Leaves the baud-rate divisors alone. QEMU ignores them; real hardware
+/// will need them set from the UART clock.
+pub fn pl011_enable(base: usize) {
+    unsafe {
+        core::ptr::write_volatile((base + UARTCR) as *mut u32, 0);
+        core::ptr::write_volatile((base + UARTLCR_H) as *mut u32, 0x70); // WLEN=8, FEN
+        core::ptr::write_volatile((base + UARTCR) as *mut u32, 0x301); // UARTEN, TXE, RXE
+    }
+}
+
+/// Write a byte to the board's console UART.
+pub fn serial_write_byte(byte: u8) {
+    pl011_write_byte(board::PL011_BASE, byte);
+}
+
+/// Try to read a byte from the board's console UART.
+pub fn serial_try_read() -> Option<u8> {
+    pl011_try_read(board::PL011_BASE)
 }
 
 /// Disable interrupts (mask IRQs via DAIF).

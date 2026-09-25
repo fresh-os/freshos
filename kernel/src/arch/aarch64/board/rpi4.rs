@@ -19,5 +19,9 @@ pub const GIC: Gic = Gic::V2 {
     gicc: 0xFF84_2000,
 };
 
+/// No MCP UART yet. The Pi 4's extra PL011s (UART2-5) need GPIO pin muxing
+/// and baud-rate setup first.
+pub const MCP_UART_BASE: Option<usize> = None;
+
 /// No virtio on real hardware: the compositor uses the UEFI framebuffer.
 pub const VIRTIO_MMIO: Option<VirtioMmio> = None;

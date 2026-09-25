@@ -2,6 +2,7 @@
 /target/
 /esp-arm/
 /edk2-arm-vars.fd
+/mcp.sock
 
 # Relocated to a separate docs repo
 /knowledge/
