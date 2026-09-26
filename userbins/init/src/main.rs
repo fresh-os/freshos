@@ -156,7 +156,7 @@ fn start_service(index: usize, channels: &[Option<Handle>; CHANNELS]) -> Option<
     let mut grants = [Grant { handle: Handle(0), rights: Rights::NONE }; 16];
     for (grant, &(channel, rights)) in grants.iter_mut().zip(service.grants) {
         let Some(handle) = channels[channel] else {
-            log!("cannot start {}: channel {} missing", service.name, channel);
+            log!("cannot start {} ({}): channel {} missing", service.name, service.binary, channel);
             return None;
         };
         *grant = Grant { handle, rights };
@@ -165,7 +165,9 @@ fn start_service(index: usize, channels: &[Option<Handle>; CHANNELS]) -> Option<
         Ok(task) => Some(task),
         Err(Error::NotFound) if service.optional => None,
         Err(e) => {
-            log!("cannot start {}: {:?}", service.name, e);
+            // Name the binary too: a missing or bad file must be findable
+            // from the log alone (decision 0006).
+            log!("cannot start {} ({}): {:?}", service.name, service.binary, e);
             None
         }
     }

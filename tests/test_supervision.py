@@ -15,7 +15,7 @@ class SupervisionTest(FreshOSTestCase):
         self.assertEqual(self.services()["pulse"]["last_exit"], "clean")
 
     def test_second_receiver_is_refused_by_the_kernel(self) -> None:
-        self.boot.wait_for_log(r"\[init\] cannot start probe-dup-recv: ReceiverTaken")
+        self.boot.wait_for_log(r"\[init\] cannot start probe-dup-recv \(PROBECHA\.ELF\): ReceiverTaken")
         self.assertTrue(self.services()["pong"]["running"])
 
     def test_shell_restart_goes_through_init(self) -> None:
@@ -216,12 +216,12 @@ class MalformedElfTest(FreshOSTestCase):
 
     def test_malformed_elf_is_refused(self) -> None:
         self.boot.wait_for_log(r"refused BADELF\.ELF: segment is writable and executable")
-        self.boot.wait_for_log(r"\[init\] cannot start probe-badelf: Invalid")
+        self.boot.wait_for_log(r"\[init\] cannot start probe-badelf \(BADELF\.ELF\): Invalid")
         self.assertTrue(self.services()["pong"]["running"])
 
     def test_program_header_offset_overflow_is_refused(self) -> None:
         self.boot.wait_for_log(r"refused BADPHOFF\.ELF: program header offset overflow")
-        self.boot.wait_for_log(r"\[init\] cannot start probe-badphoff: Invalid")
+        self.boot.wait_for_log(r"\[init\] cannot start probe-badphoff \(BADPHOFF\.ELF\): Invalid")
         services = self.services()
         for name in ("pong", "ping", "kbd", "comp", "shell", "dash", "mcp"):
             self.assertTrue(services[name]["running"], name)
