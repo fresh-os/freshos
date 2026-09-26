@@ -32,6 +32,7 @@ if sys.version_info < (3, 14):
 
 REPO = Path(__file__).resolve().parent.parent
 RUN_ARM = REPO / "run-arm.sh"
+USER_TARGET_DIR = REPO / "target" / "aarch64-unknown-none" / "debug"
 
 # Userbins that exist only for tests. They are built and staged for test boots
 # and listed as optional in init's service table, so normal boots never run them.
@@ -109,10 +110,19 @@ class Boot:
     """One QEMU boot of FreshOS with its own ESP, sockets and UEFI variables."""
 
     def __init__(
-        self, *, omit: tuple[str, ...] = (), extra_files: dict[str, bytes] | None = None
+        self,
+        *,
+        omit: tuple[str, ...] = (),
+        extra_files: dict[str, bytes] | None = None,
+        stage_as: dict[str, str] | None = None,
     ) -> None:
+        """`omit` leaves userbins off the ESP; `extra_files` adds files by
+        ESP name; `stage_as` adds a built userbin under another ESP name
+        (e.g. {"PROBEBUF.ELF": "probe-chan"}), so a test class can start
+        init table entries that no other boot has."""
         self.omit = omit
         self.extra_files = extra_files or {}
+        self.stage_as = stage_as or {}
         # tempfile's default directory keeps "<dir>/mcp.sock" well under the
         # 104-byte limit macOS puts on Unix socket paths.
         self.dir = Path(tempfile.mkdtemp(prefix="fos-"))
@@ -128,6 +138,8 @@ class Boot:
         extra_dir.mkdir()
         for name, data in self.extra_files.items():
             (extra_dir / name).write_bytes(data)
+        for name, package in self.stage_as.items():
+            shutil.copyfile(USER_TARGET_DIR / f"freshos-{package}", extra_dir / name)
         env = {
             **os.environ,
             "SKIP_BUILD": "1",

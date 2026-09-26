@@ -1,10 +1,7 @@
 #![no_std]
 #![no_main]
 
-use freshos_rt::{
-    Error, Handle, Message, Startup, abi, entry, exit, log, recv, send, spawn, time_ns, try_recv,
-    yield_now,
-};
+use freshos_rt::{Error, Handle, Message, Startup, abi, entry, exit, log, recv, send, spawn, try_recv};
 
 entry!(main);
 
@@ -35,8 +32,8 @@ fn main(start: Startup) -> ! {
     }
 }
 
-/// Log every message; exit after the first, so init restarts this service
-/// while the sender is still sending.
+/// Log every message; exit after the first, so seq 2 and 3 can only reach a
+/// restarted instance.
 fn buffer_receiver(channel: Handle) -> ! {
     loop {
         match recv(channel) {
@@ -51,15 +48,11 @@ fn buffer_receiver(channel: Handle) -> ! {
     }
 }
 
-/// Send seq 1, which ends the receiver's first run; then, while it is down
-/// (it restarts 300 ms later), send seq 2 and 3, and exit.
+/// Send seq 1, which ends the receiver's first run, then seq 2 and 3, and
+/// exit. Nothing here waits: the channel is FIFO, so whenever 2 and 3 are
+/// sent, they are queued behind 1 and outlive the instance that takes 1.
 fn buffer_sender(channel: Handle) -> ! {
-    let _ = send(channel, &Message::new(0).with_data(0, 1));
-    let resume = time_ns() + 100_000_000;
-    while time_ns() < resume {
-        yield_now();
-    }
-    for seq in 2..=3 {
+    for seq in 1..=3 {
         match send(channel, &Message::new(0).with_data(0, seq)) {
             Ok(()) => log!("[buf] sent seq={seq}"),
             Err(e) => log!("[buf] send seq={seq} failed: {e:?}"),

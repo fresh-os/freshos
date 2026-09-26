@@ -58,15 +58,16 @@ const TABLE: &[Service] = &[
     Service { grants: &[(PING, RECV)], optional: true, ..service("probe-dup-recv", "PROBECHA.ELF") },
     Service { optional: true, ..service("probe-badelf", "BADELF.ELF") },
     // A supervised receiver that exits after its first message, and a sender
-    // that sends more while it is down: they must wait for the restart.
+    // of three: the last two must wait in the channel for the restart. The
+    // test that wants them stages probe-chan a second time as PROBEBUF.ELF.
     Service {
         grants: &[(BUF, RECV)],
         arg: 1,
         restart_after_ms: Some(300),
         optional: true,
-        ..service("probe-buf-rx", "PROBECHA.ELF")
+        ..service("probe-buf-rx", "PROBEBUF.ELF")
     },
-    Service { grants: &[(BUF, SEND)], arg: 2, optional: true, ..service("probe-buf-tx", "PROBECHA.ELF") },
+    Service { grants: &[(BUF, SEND)], arg: 2, optional: true, ..service("probe-buf-tx", "PROBEBUF.ELF") },
 ];
 
 #[derive(Clone, Copy)]

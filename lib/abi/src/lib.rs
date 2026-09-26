@@ -234,3 +234,28 @@ pub const MAX_HANDLES: usize = 16;
 pub const NAME_LEN: usize = 16;
 pub const MAX_BINARY_NAME: usize = 32;
 pub const MAX_LOG: usize = 256;
+
+#[cfg(test)]
+mod tests {
+    use super::TaskRef;
+
+    #[test]
+    fn task_ref_round_trips_through_its_packed_form() {
+        for task in [
+            TaskRef { id: 0, generation: 0 },
+            TaskRef { id: 15, generation: 1 },
+            TaskRef { id: u16::MAX, generation: u32::MAX },
+            TaskRef { id: 0x1234, generation: 0x89AB_CDEF },
+        ] {
+            assert_eq!(TaskRef::unpack(task.pack()), task);
+        }
+    }
+
+    #[test]
+    fn task_ref_packs_to_the_documented_bits() {
+        let packed = TaskRef { id: 0x1234, generation: 0x89AB_CDEF }.pack();
+        assert_eq!(packed, 0x89AB_CDEF_1234);
+        // Bits 48..64 stay clear, so spawn's result is never negative.
+        assert!((TaskRef { id: u16::MAX, generation: u32::MAX }.pack() as i64) > 0);
+    }
+}

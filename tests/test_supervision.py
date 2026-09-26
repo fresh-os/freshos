@@ -69,23 +69,6 @@ class SupervisionTest(FreshOSTestCase):
         after = frames_between_fault_runs()
         self.assertLessEqual(abs(before - after), 2, f"frames {before} -> {after}")
 
-    def test_queued_messages_survive_a_restart(self) -> None:
-        # probe-buf-rx exits after seq 1; probe-buf-tx sends 2 and 3 while it
-        # is down. They must wait in the channel for the restarted instance.
-        self.boot.wait_for_log(r"^\[probe-buf-rx\] \[buf\] got seq=3$", timeout=30)
-
-        def line(pattern: str) -> int:
-            regex = re.compile(pattern)
-            return next(i for i, text in enumerate(self.boot.lines) if regex.search(text))
-
-        sent = line(r"^\[probe-buf-tx\] \[buf\] sent seq=3$")
-        restarted = line(r"^\[init\] restarting probe-buf-rx$")
-        received = line(r"^\[probe-buf-rx\] \[buf\] got seq=2$")
-        self.assertLess(line(r"^\[probe-buf-rx\] \[buf\] got seq=1$"), sent)
-        self.assertLess(sent, restarted, "seq 3 was sent while the receiver was down")
-        self.assertLess(restarted, received, "seq 2 reached the restarted instance")
-        self.assertGreaterEqual(self.services()["probe-buf-rx"]["restarts"], 1)
-
     def test_exits_are_charged_to_the_exact_task(self) -> None:
         # A task id is reused as soon as its task exits; the generation tells
         # the instances apart, so each service is charged only its own exits.
@@ -99,28 +82,54 @@ class SupervisionTest(FreshOSTestCase):
         self.assertTrue(all(task["generation"] >= 1 for task in tasks), tasks)
         self.assertEqual(self.boot.find_logs(r"^\[init\] fault exited \(clean\)"), [])
         self.assertEqual(self.boot.find_logs(r"^\[init\] pulse exited \(fault\)"), [])
+
+        expected = (("fault", "fault"), ("pulse", "clean"))
+
+        def logged() -> dict[str, tuple[int, int]]:
+            return {
+                name: (
+                    len(self.boot.find_logs(rf"^\[init\] {name} exited \({reason}\)$")),
+                    len(self.boot.find_logs(rf"^\[init\] restarting {name}$")),
+                )
+                for name, reason in expected
+            }
+
+        # Both services keep exiting while this runs, so bracket the kernel's
+        # snapshot with two log counts. The pause lets every line init wrote
+        # before the snapshot reach the harness before the second count.
+        before = logged()
         services = self.services()
-        for name, reason in (("fault", "fault"), ("pulse", "clean")):
-            logged = len(self.boot.find_logs(rf"^\[init\] {name} exited \({reason}\)$"))
-            restarts = len(self.boot.find_logs(rf"^\[init\] restarting {name}$"))
+        time.sleep(0.5)
+        after = logged()
+        for name, _ in expected:
+            exits, restarts = services[name]["exits"], services[name]["restarts"]
             with self.subTest(service=name):
-                # The kernel records an exit just before init hears of it,
-                # and a restart just after init asks, so allow one in flight.
-                self.assertIn(services[name]["exits"] - logged, (0, 1))
-                self.assertIn(restarts - services[name]["restarts"], (0, 1))
+                # The kernel counts an exit before init logs it, and init
+                # starts no new instance until it has, so at most one exit
+                # is ever unlogged.
+                self.assertLessEqual(before[name][0], exits, (before, services[name], after))
+                self.assertLessEqual(exits, after[name][0] + 1, (before, services[name], after))
+                # init logs "restarting" just before the spawn the kernel
+                # counts, so at most one logged restart is uncounted.
+                self.assertLessEqual(before[name][1] - 1, restarts, (before, services[name], after))
+                self.assertLessEqual(restarts, after[name][1], (before, services[name], after))
 
     def test_every_instance_gets_a_new_generation(self) -> None:
-        # fault restarts into a freed slot, usually the one it just left.
-        seen: list[tuple[int, int]] = []
+        # fault crash-loops into a freed slot, usually the one it just left,
+        # so a reused slot always turns up; wait for one. Instances are told
+        # apart by the kernel's restart count, not by (task, generation),
+        # so a generation that failed to change would still be caught.
+        instances: dict[int, tuple[int, int]] = {}  # restarts -> (task, generation)
 
-        def fault_instances() -> int:
+        def slot_reused() -> bool:
             fault = self.services().get("fault", {})
-            instance = (fault.get("task"), fault.get("generation"))
-            if fault.get("running") and instance not in seen:
-                seen.append(instance)
-            return len(seen)
+            if fault.get("running"):
+                instances.setdefault(fault["restarts"], (fault["task"], fault["generation"]))
+            tasks = [task for task, _ in instances.values()]
+            return len(tasks) > len(set(tasks))
 
-        self.wait_until(lambda: fault_instances() >= 3, timeout=40, message="three fault instances")
+        self.wait_until(slot_reused, timeout=40, message="fault to restart into a slot it used before")
+        seen = [instances[restarts] for restarts in sorted(instances)]
         for i, (task, generation) in enumerate(seen):
             for earlier_task, earlier_generation in seen[:i]:
                 if task == earlier_task:
@@ -152,6 +161,35 @@ def elf_with_wx_segment() -> bytes:
         0x80, 0x80, 0x1000,                 # filesz, memsz, align
     )
     return (header + segment).ljust(0x80, b"\0")
+
+
+class BufferingTest(FreshOSTestCase):
+    # Only this boot has PROBEBUF.ELF, and it leaves off the other probes, so
+    # the two buffering probes always find free task slots.
+    boot_options = {"omit": ("probe-bad", "probe-chan"), "stage_as": {"PROBEBUF.ELF": "probe-chan"}}
+
+    def line(self, pattern: str) -> int:
+        """The index of the only serial line matching `pattern`."""
+        regex = re.compile(pattern)
+        found = [i for i, text in enumerate(self.boot.lines) if regex.search(text)]
+        self.assertEqual(len(found), 1, f"/{pattern}/ matched lines {found}")
+        return found[0]
+
+    def test_queued_messages_survive_a_restart(self) -> None:
+        # probe-buf-rx exits after seq 1, so seq 2 and 3 can only reach the
+        # instance init restarts. The channel is FIFO, so this holds however
+        # the sender's sends interleave with the receiver's exit.
+        self.boot.wait_for_log(r"^\[probe-buf-rx\] \[buf\] got seq=3$", timeout=30)
+        for seq in (1, 2, 3):
+            self.line(rf"^\[probe-buf-tx\] \[buf\] sent seq={seq}$")
+        first = self.line(r"^\[probe-buf-rx\] \[buf\] got seq=1$")
+        restarted = self.line(r"^\[init\] restarting probe-buf-rx$")
+        second = self.line(r"^\[probe-buf-rx\] \[buf\] got seq=2$")
+        third = self.line(r"^\[probe-buf-rx\] \[buf\] got seq=3$")
+        self.assertLess(first, restarted, "the first instance took seq 1, then exited")
+        self.assertLess(restarted, second, "seq 2 waited for the restarted instance")
+        self.assertLess(second, third, "the queue kept its order")
+        self.assertEqual(self.services()["probe-buf-rx"]["restarts"], 1)
 
 
 class MalformedElfTest(FreshOSTestCase):
