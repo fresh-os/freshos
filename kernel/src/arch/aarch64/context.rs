@@ -96,6 +96,13 @@ unsafe impl Sync for PendingCell {}
 
 static PENDING_FREES: PendingCell = PendingCell(UnsafeCell::new([EMPTY_PENDING; MAX_TASKS]));
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
+
+/// The last direct hand-off: `DONOR` sent to `TARGET` and gave it the CPU.
+/// NONE when there is no hand-off to return from. Only touched with IRQs
+/// masked.
+const NONE: usize = usize::MAX;
+static DONOR: AtomicUsize = AtomicUsize::new(NONE);
+static TARGET: AtomicUsize = AtomicUsize::new(NONE);
 static COUNT: AtomicUsize = AtomicUsize::new(0);
 
 fn tasks() -> *mut [Task; MAX_TASKS] {
@@ -212,11 +219,20 @@ extern "C" fn scheduler_tick_arm(stack_ptr: u64) -> u64 {
     timer::handle_irq();
     gic::end_of_interrupt(intid);
     expire_waits(super::time_ns());
+    // A tick always rotates: no hand-off is returned from across one, so
+    // sender-return never keeps a pair on the CPU past its time slice.
+    forget_hand_off();
     switch_away(stack_ptr)
 }
 
-/// Save the current task's frame and pick the next ready task, round-robin.
-/// Returns the frame to restore. Runs with IRQs masked (exception context).
+/// Save the current task's frame and pick the next task to run. Returns the
+/// frame to restore. Runs with IRQs masked (exception context).
+///
+/// Sender-return: if the current task was run by a hand-off and has now
+/// blocked, and its sender is still ready, the sender runs next. A
+/// request/response pair then goes straight back to the requester instead
+/// of waiting up to a tick behind every task idling in wfi. Otherwise (the
+/// task yielded, exited or was preempted) the choice is round-robin.
 pub fn switch_away(frame: u64) -> u64 {
     let t = unsafe { &mut *tasks() };
     let cur = CURRENT.load(Ordering::SeqCst);
@@ -225,6 +241,15 @@ pub fn switch_away(frame: u64) -> u64 {
     }
     if t[cur].state == State::Running {
         t[cur].state = State::Ready;
+    }
+    let donor = DONOR.load(Ordering::SeqCst);
+    let returning = TARGET.load(Ordering::SeqCst) == cur
+        && t[cur].state == State::Blocked
+        && donor < MAX_TASKS
+        && t[donor].state == State::Ready;
+    forget_hand_off();
+    if returning {
+        return run(t, donor);
     }
     let next = (1..=MAX_TASKS)
         .map(|step| (cur + step) % MAX_TASKS)
@@ -245,7 +270,14 @@ pub fn hand_off(frame: u64, target: usize) -> u64 {
     if t[cur].state == State::Running {
         t[cur].state = State::Ready;
     }
+    DONOR.store(cur, Ordering::SeqCst);
+    TARGET.store(target, Ordering::SeqCst);
     run(t, target)
+}
+
+fn forget_hand_off() {
+    DONOR.store(NONE, Ordering::SeqCst);
+    TARGET.store(NONE, Ordering::SeqCst);
 }
 
 fn run(t: &mut [Task; MAX_TASKS], next: usize) -> u64 {
@@ -529,6 +561,11 @@ pub fn retire_current(reason: u64) {
         return;
     }
     let t = unsafe { &mut *tasks() };
+    // An exiting task is never returned to, and never returns to its sender
+    // (its slot may be reused before the next switch).
+    if DONOR.load(Ordering::SeqCst) == cur || TARGET.load(Ordering::SeqCst) == cur {
+        forget_hand_off();
+    }
     // A task that exits (or faults) while waiting leaves no waiter behind.
     if let Some(wait) = t[cur].wait.take() {
         crate::ipc::cancel_waiter(wait.channel, cur);

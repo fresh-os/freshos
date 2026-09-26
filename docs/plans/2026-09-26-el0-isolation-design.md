@@ -314,7 +314,11 @@ state, as an interrupt does, so the scheduler's switch applies to both:
 - a `recv` with nothing waiting marks the task blocked and switches away
   immediately;
 - a `send` that wakes a waiting receiver switches straight to it. The
-  sender stays ready and runs again in its round-robin turn;
+  sender stays ready. If the receiver then blocks in `recv` before the next
+  tick and the sender is still ready, the sender runs next (sender-return);
+  otherwise it runs in its round-robin turn. Without this, a request/response
+  pair would wait up to a tick behind every task idling in `wfi`. The timer
+  tick still preempts and rotates, so fairness holds at tick granularity;
 - a `recv` deadline is checked on each timer tick.
 
 **Delivery-latency metric.** The kernel records the time from each send to
