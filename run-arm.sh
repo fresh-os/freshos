@@ -1,10 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Build FreshOS for aarch64, stage an ESP, and boot it in QEMU.
+#
+# Optional environment overrides (tests/harness.py uses these):
+#   ESP_DIR          where to stage the ESP                    (default: ./esp-arm)
+#   MCP_SOCK         the MCP bridge's Unix socket              (default: ./mcp.sock)
+#   EXTRA_ELFS       extra userbin packages, without "freshos-", to build and stage
+#   OMIT_ELFS        userbin packages to leave off the ESP, e.g. "init"
+#   EXTRA_FILES_DIR  files copied as-is into \EFI\FreshOS\ (e.g. malformed ELFs)
+#   OVMF_VARS        writable UEFI variable store              (default: ./edk2-arm-vars.fd)
+#   SKIP_BUILD=1     stage what is already built
+#   BUILD_ONLY=1     build, then exit without staging or booting
+#   FRESHOS_ACCEL    hvf (default) or tcg
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 OVMF_CODE="/opt/homebrew/share/qemu/edk2-aarch64-code.fd"
 OVMF_VARS_SRC="/opt/homebrew/share/qemu/edk2-arm-vars.fd"
-OVMF_VARS="$SCRIPT_DIR/edk2-arm-vars.fd"
+OVMF_VARS="${OVMF_VARS:-$SCRIPT_DIR/edk2-arm-vars.fd}"
+ESP_ROOT="${ESP_DIR:-$SCRIPT_DIR/esp-arm}"
+MCP_SOCK="${MCP_SOCK:-$SCRIPT_DIR/mcp.sock}"
+ACCEL="${FRESHOS_ACCEL:-hvf}"
 
 PROFILE="debug"
 CARGO_FLAGS=""
@@ -14,41 +30,62 @@ if [[ "${1:-}" == "--release" ]]; then
     shift
 fi
 
+# Every userbin, by package name without the "freshos-" prefix.
+USERBINS="init pong pulse fault ${EXTRA_ELFS:-}"
+
 TARGET_DIR="$SCRIPT_DIR/target/aarch64-unknown-uefi/$PROFILE"
 USER_TARGET_DIR="$SCRIPT_DIR/target/aarch64-unknown-none/$PROFILE"
-ESP_DIR="$SCRIPT_DIR/esp-arm/EFI/BOOT"
-INIT_DIR="$SCRIPT_DIR/esp-arm/EFI/FreshOS"
+BOOT_DIR="$ESP_ROOT/EFI/BOOT"
+FRESHOS_DIR="$ESP_ROOT/EFI/FreshOS"
 
-echo ":: Building FreshOS kernel for aarch64 ($PROFILE)..."
-rustup run nightly cargo build --package freshos-kernel --target aarch64-unknown-uefi $CARGO_FLAGS
-echo ":: Building FreshOS init for aarch64 ($PROFILE)..."
-rustup run nightly cargo build --package freshos-init --target aarch64-unknown-none $CARGO_FLAGS
-echo ":: Building FreshOS pong service for aarch64 ($PROFILE)..."
-rustup run nightly cargo build --package freshos-pong --target aarch64-unknown-none $CARGO_FLAGS
-echo ":: Building FreshOS pulse service for aarch64 ($PROFILE)..."
-rustup run nightly cargo build --package freshos-pulse --target aarch64-unknown-none $CARGO_FLAGS
-echo ":: Building FreshOS fault service for aarch64 ($PROFILE)..."
-rustup run nightly cargo build --package freshos-fault --target aarch64-unknown-none $CARGO_FLAGS
+# ESP file name for a userbin: upper case, no hyphens, at most 8 characters (FAT 8.3).
+elf_name() {
+    local n="${1//-/}"
+    n="$(printf '%s' "$n" | tr '[:lower:]' '[:upper:]')"
+    printf '%s.ELF' "${n:0:8}"
+}
 
-echo ":: Preparing UEFI boot image..."
-mkdir -p "$ESP_DIR"
-mkdir -p "$INIT_DIR"
-cp "$TARGET_DIR/freshos-kernel.efi" "$ESP_DIR/BOOTAA64.EFI"
-cp "$USER_TARGET_DIR/freshos-init" "$INIT_DIR/INIT.ELF"
-cp "$USER_TARGET_DIR/freshos-pong" "$INIT_DIR/PONG.ELF"
-cp "$USER_TARGET_DIR/freshos-pulse" "$INIT_DIR/PULSE.ELF"
-cp "$USER_TARGET_DIR/freshos-fault" "$INIT_DIR/FAULT.ELF"
+if [[ -z "${SKIP_BUILD:-}" ]]; then
+    echo ":: Building FreshOS kernel for aarch64 ($PROFILE)..."
+    rustup run nightly cargo build --package freshos-kernel --target aarch64-unknown-uefi $CARGO_FLAGS
+    for bin in $USERBINS; do
+        echo ":: Building $bin for aarch64 ($PROFILE)..."
+        rustup run nightly cargo build --package "freshos-$bin" --target aarch64-unknown-none $CARGO_FLAGS
+    done
+fi
+if [[ -n "${BUILD_ONLY:-}" ]]; then
+    exit 0
+fi
 
-# Create writable UEFI vars file if it doesn't exist
+echo ":: Preparing UEFI boot image in $ESP_ROOT..."
+rm -rf "$FRESHOS_DIR"
+mkdir -p "$BOOT_DIR" "$FRESHOS_DIR"
+cp "$TARGET_DIR/freshos-kernel.efi" "$BOOT_DIR/BOOTAA64.EFI"
+for bin in $USERBINS; do
+    if [[ " ${OMIT_ELFS:-} " == *" $bin "* ]]; then
+        echo ":: Omitting $bin"
+        continue
+    fi
+    cp "$USER_TARGET_DIR/freshos-$bin" "$FRESHOS_DIR/$(elf_name "$bin")"
+done
+if [[ -n "${EXTRA_FILES_DIR:-}" ]] && compgen -G "$EXTRA_FILES_DIR/*" > /dev/null; then
+    cp "$EXTRA_FILES_DIR"/* "$FRESHOS_DIR/"
+fi
+
 if [ ! -f "$OVMF_VARS" ]; then
     echo ":: Copying UEFI vars..."
     cp "$OVMF_VARS_SRC" "$OVMF_VARS"
 fi
 
-echo ":: Launching QEMU aarch64 (HVF primary demo path, serial on stdio, MCP on mcp.sock)..."
+CPU="host"
+if [[ "$ACCEL" == "tcg" ]]; then
+    CPU="max"
+fi
+
+echo ":: Launching QEMU aarch64 ($ACCEL, serial on stdio, MCP on $MCP_SOCK)..."
 exec qemu-system-aarch64 \
-    -machine virt,accel=hvf,highmem=off \
-    -cpu host \
+    -machine virt,accel="$ACCEL",highmem=off,gic-version=3 \
+    -cpu "$CPU" \
     -m 512M \
     -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
     -drive if=pflash,format=raw,file="$OVMF_VARS" \
@@ -58,6 +95,6 @@ exec qemu-system-aarch64 \
     -device qemu-xhci \
     -device usb-kbd \
     -serial mon:stdio \
-    -serial unix:"$SCRIPT_DIR/mcp.sock",server=on,wait=off \
-    -drive format=raw,file=fat:rw:"$SCRIPT_DIR/esp-arm" \
+    -serial unix:"$MCP_SOCK",server=on,wait=off \
+    -drive format=raw,file=fat:rw:"$ESP_ROOT" \
     "$@"

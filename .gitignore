@@ -3,6 +3,7 @@
 /esp-arm/
 /edk2-arm-vars.fd
 /mcp.sock
+__pycache__/
 
 # Relocated to a separate docs repo
 /knowledge/
