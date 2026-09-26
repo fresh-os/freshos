@@ -42,9 +42,12 @@ Pi 4.
 **Found:** `tlbi` works under QEMU 11 with HVF (on older QEMU it hung the guest,
 which is why tasks run at EL1 on the Mac). A remap test showed stale
 translations persist until `tlbi`, so page-permission edits now end with a TLB
-invalidation. Per-task EL0 isolation may therefore be buildable on QEMU,
-pending a recheck of two other old HVF limits: permission faults on 2 MiB
-blocks, and `msr SP_EL1` trapping at EL1.
+invalidation. The two other old HVF limits don't block it
+either. A permission fault on a 2 MiB block now reaches the guest as a normal
+data abort (it used to crash QEMU with an `isv` assertion). `msr SP_EL1` at EL1
+is undefined by the architecture on any hardware, so the kernel sets its own
+stack with `mov sp` and user stacks with `msr SP_EL0`, which works. **Per-task
+EL0 isolation can be built on QEMU, without waiting for a Pi 4.**
 
 **Worth a look:** with everything running, the metrics show a frame taking about
 13 ms and an IPC round trip about 14.5 ms, against the manifesto's sub-1 µs IPC

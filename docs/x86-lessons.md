@@ -23,7 +23,7 @@ commit (`kernel/src/{paging,scheduler,syscall}.rs`, `x86_tasks` in `main.rs`).
 On every context switch, x86 updated two values: `TSS.RSP0`, the stack the CPU
 uses for interrupts from ring 3, and `kernel_rsp`, used by the syscall entry
 stub. Each task therefore needs its own kernel stack, and the switch code must
-install it. On aarch64 the equivalent is `SP_EL1`.
+install it. On aarch64 the equivalent is `SP_EL1`. The kernel can't write it with `msr` (undefined at EL1): it sets `sp` with `mov` while running on the task's kernel stack, and the CPU uses `SP_EL1` again on the next exception from EL0.
 
 ## The syscall boundary
 
