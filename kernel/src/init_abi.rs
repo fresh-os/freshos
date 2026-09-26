@@ -113,13 +113,20 @@ fn spawn_mcp_service() -> usize {
 }
 
 fn spawn_fault_service() -> usize {
-    if let (Some(entry), Some(user_stack)) = (
-        crate::service_abi::external_fault_entry(),
-        crate::service_abi::external_fault_user_stack(),
-    ) {
-        arch::context::spawn_user_pregranted(entry, user_stack)
-    } else {
-        arch::context::spawn(crate::arm_tasks::supervised_fault_el1)
+    let Some(image) = crate::boot_images::find("FAULT.ELF") else {
+        serial_println!("[init] FAULT.ELF missing");
+        return 0;
+    };
+    match arch::context::spawn_el0(image, 0, 0) {
+        Ok(id) => id,
+        Err(arch::context::SpawnError::BadImage(reason)) => {
+            serial_println!("[init] cannot start fault: bad image: {}", reason);
+            0
+        }
+        Err(err) => {
+            serial_println!("[init] cannot start fault: {:?}", err);
+            0
+        }
     }
 }
 
@@ -265,6 +272,12 @@ extern "C" fn init_spawn_service(service_id: u64) -> i64 {
     let had_previous_exit =
         SERVICE_LAST_EXITS[service_idx].load(Ordering::SeqCst) != SERVICE_EXIT_NONE;
     let task_id = (definition.spawn)();
+    if task_id == 0 {
+        // Spawn failed (task 0 is the idle task, never a service). Leave the
+        // service stopped so a later request can try again.
+        STARTED_SERVICES.fetch_and(!bit, Ordering::SeqCst);
+        return -1;
+    }
     crate::task_names::register(task_id, definition.name);
 
     if had_previous_exit {

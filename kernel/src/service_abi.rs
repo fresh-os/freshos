@@ -25,8 +25,6 @@ pub struct ServiceApi {
 
 static EXTERNAL_PONG_ENTRY: AtomicU64 = AtomicU64::new(0);
 static EXTERNAL_PULSE_ENTRY: AtomicU64 = AtomicU64::new(0);
-static EXTERNAL_FAULT_ENTRY: AtomicU64 = AtomicU64::new(0);
-static EXTERNAL_FAULT_USER_STACK: AtomicU64 = AtomicU64::new(0);
 
 extern "C" fn service_log(ptr: *const u8, len: usize) {
     if ptr.is_null() || len == 0 {
@@ -122,25 +120,6 @@ pub fn external_pulse_entry() -> Option<u64> {
     match EXTERNAL_PULSE_ENTRY.load(Ordering::SeqCst) {
         0 => None,
         entry => Some(entry),
-    }
-}
-
-pub fn register_external_fault(entry: u64, user_stack_bottom: u64) {
-    EXTERNAL_FAULT_ENTRY.store(entry, Ordering::SeqCst);
-    EXTERNAL_FAULT_USER_STACK.store(user_stack_bottom, Ordering::SeqCst);
-}
-
-pub fn external_fault_entry() -> Option<u64> {
-    match EXTERNAL_FAULT_ENTRY.load(Ordering::SeqCst) {
-        0 => None,
-        entry => Some(entry),
-    }
-}
-
-pub fn external_fault_user_stack() -> Option<u64> {
-    match EXTERNAL_FAULT_USER_STACK.load(Ordering::SeqCst) {
-        0 => None,
-        stack => Some(stack),
     }
 }
 

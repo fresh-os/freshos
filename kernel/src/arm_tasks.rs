@@ -2233,18 +2233,6 @@ pub fn supervised_pulse_el1() -> ! {
     crate::arch::context::terminate_current_with_reason(crate::init_abi::SERVICE_EXIT_CLEAN)
 }
 
-pub fn supervised_fault_el1() -> ! {
-    crate::serial::serial_println!("[fault] builtin start");
-    for beat in 1..=2u64 {
-        for _ in 0..300 {
-            yield_now();
-        }
-        crate::serial::serial_println!("[fault] builtin beat {}", beat);
-    }
-    crate::serial::serial_println!("[fault] builtin crash");
-    unsafe { core::arch::asm!("brk #0", options(noreturn)) }
-}
-
 // ============================================================================
 // Keyboard — polls PL011 UART, sends key events via IPC
 // ============================================================================

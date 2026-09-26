@@ -159,47 +159,6 @@ pub fn allocate_contiguous(count: usize) -> Option<u64> {
     None
 }
 
-/// Allocate `count` contiguous 4 KiB frames whose base frame is aligned to
-/// `align_count` frames. Returns the base physical address.
-pub fn allocate_contiguous_aligned(count: usize, align_count: usize) -> Option<u64> {
-    if count == 0 || align_count == 0 {
-        return None;
-    }
-
-    let mut frame = align_count.max(1);
-    while frame + count <= MAX_FRAMES {
-        if frame % align_count != 0 {
-            frame += align_count - (frame % align_count);
-            continue;
-        }
-
-        let mut free = true;
-        for candidate in frame..frame + count {
-            let byte = candidate / 8;
-            let bit = candidate % 8;
-            let used = unsafe { *bm().add(byte) } & (1 << bit) != 0;
-            if used {
-                free = false;
-                break;
-            }
-        }
-
-        if free {
-            for candidate in frame..frame + count {
-                let byte = candidate / 8;
-                let bit = candidate % 8;
-                unsafe { *bm().add(byte) |= 1u8 << bit };
-            }
-            FREE_COUNT.fetch_sub(count, Ordering::Relaxed);
-            return Some(frame as u64 * FRAME_SIZE);
-        }
-
-        frame += align_count;
-    }
-
-    None
-}
-
 pub fn free_count() -> usize {
     FREE_COUNT.load(Ordering::Relaxed)
 }

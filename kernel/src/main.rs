@@ -68,8 +68,6 @@ const SURF_H: usize = 480;
 // (Old taskbar constants replaced by TBAR_H / TBAR_Y in compositor section)
 const SURF_BYTES: usize = SURF_W * SURF_H * 4;
 const SURF_PAGES: usize = (SURF_BYTES + 4095) / 4096;
-const EL0_FAULT_REGION_BYTES: usize = 2 * 1024 * 1024;
-const EL0_FAULT_REGION_PAGES: usize = EL0_FAULT_REGION_BYTES / 4096;
 
 // ============================================================================
 // Boot info
@@ -355,50 +353,6 @@ fn main() -> Status {
             }
             Err(err) => {
                 serial_println!("  Pulse ELF load failed: {}", err);
-            }
-        }
-    }
-
-    if let Some(bytes) = boot_images::find("FAULT.ELF") {
-        let fault_region = frame_alloc::allocate_contiguous_aligned(
-            EL0_FAULT_REGION_PAGES,
-            EL0_FAULT_REGION_PAGES,
-        );
-        match fault_region {
-            Some(region_base) => match elf::load_image_into(
-                bytes,
-                region_base,
-                EL0_FAULT_REGION_BYTES - arch::context::USER_STACK_BYTES as usize,
-            ) {
-                Ok(image) => {
-                    let user_stack_bottom = region_base
-                        + (EL0_FAULT_REGION_BYTES as u64 - arch::context::USER_STACK_BYTES);
-                    unsafe {
-                        core::ptr::write_bytes(
-                            user_stack_bottom as *mut u8,
-                            0,
-                            arch::context::USER_STACK_BYTES as usize,
-                        );
-                    }
-                    arch::paging::grant_user_access(region_base, EL0_FAULT_REGION_BYTES as u64);
-                    arch::paging::make_executable(image.base, image.size as u64);
-                    service_abi::register_external_fault(image.entry, user_stack_bottom);
-                    serial_println!(
-                        "  Fault ELF loaded: base={:#x} size={} entry={:#x} ustack={:#x} region={:#x}..{:#x}",
-                        image.base,
-                        image.size,
-                        image.entry,
-                        user_stack_bottom,
-                        region_base,
-                        region_base + EL0_FAULT_REGION_BYTES as u64,
-                    );
-                }
-                Err(err) => {
-                    serial_println!("  Fault ELF load failed: {}", err);
-                }
-            },
-            None => {
-                serial_println!("  Fault ELF load failed: no aligned EL0 region");
             }
         }
     }

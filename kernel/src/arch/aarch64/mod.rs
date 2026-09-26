@@ -1,4 +1,5 @@
 /// aarch64 architecture backend. Board-specific addresses live in `board`.
+pub mod addrspace;
 pub mod board;
 pub mod context;
 pub mod exceptions;

@@ -6,3 +6,8 @@ target = "aarch64-unknown-uefi"
 [unstable]
 build-std = ["core", "alloc"]
 build-std-features = ["compiler-builtins-mem"]
+
+# Userbins are linked at the start of every task's private 1 GiB window
+# (0x4_0000_0000, slot 16 of the top-level page table). See the EL0 isolation spec.
+[target.aarch64-unknown-none]
+rustflags = ["-C", "link-arg=--image-base=0x400000000"]

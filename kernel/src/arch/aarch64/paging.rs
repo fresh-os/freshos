@@ -1,22 +1,19 @@
-/// aarch64 page tables — patch UEFI's tables for EL0 access.
+/// aarch64 page tables: the firmware's table, which the kernel keeps.
 ///
-/// We modify UEFI's existing L3 page entries in-place. Only pages that EL0
-/// tasks need (user stacks, code, framebuffer, surfaces) are patched, and
-/// only their permission bits (AP, XN) change. The architecture doesn't
-/// require break-before-make for permission-only changes, but the TLB may
-/// still hold the old permissions, so every batch of edits ends with a TLB
-/// invalidation (`flush_tlb`).
+/// UEFI's identity map stays the kernel's map, EL1-only, in every address
+/// space (see `addrspace`, which builds each EL0 task's own table from it).
+/// `init` sets up the system registers for that: WXN off, PAN on, and the
+/// ASID taken from TTBR0.
 ///
-/// Since EL1 (kernel) also needs to access these pages, we disable both
-/// PAN and WXN in SCTLR_EL1.
-///
-/// No TTBR0 switching — all tasks share UEFI's (patched) page tables.
+/// `make_executable` edits the firmware's leaf entries in place so built-in
+/// services loaded at EL1 can run. The architecture doesn't require
+/// break-before-make for permission-only changes, but the TLB may still hold
+/// the old permissions, so every batch of edits ends with a TLB invalidation
+/// (`flush_tlb`).
 use crate::serial::serial_println;
 
 const VALID: u64 = 1 << 0;
 const TABLE: u64 = 1 << 1;
-const AP_MASK: u64 = 0b11 << 6;
-const AP_RW_ALL: u64 = 0b01 << 6;
 const PXN: u64 = 1 << 53;
 const UXN: u64 = 1 << 54;
 const PXN_TABLE: u64 = 1 << 59;
@@ -26,7 +23,8 @@ const ADDR_MASK: u64 = 0x0000_FFFF_FFFF_F000;
 static mut TTBR0_ROOT: u64 = 0;
 static mut START_LEVEL: u32 = 1;
 
-/// Disable WXN and PAN, record UEFI page table geometry.
+/// Turn WXN off and PAN on, clear TCR.A1, and hand the firmware's table to
+/// `addrspace`.
 ///
 /// Returns the current TTBR0 (unchanged).
 ///
@@ -49,54 +47,41 @@ pub unsafe fn init() -> u64 {
         START_LEVEL = if t0sz >= 25 { 1 } else { 0 };
     }
 
-    // Disable WXN (writable = execute-never) and enable SPAN (don't set PAN on exception)
+    // WXN off (writable pages stay executable where the firmware said so);
+    // SPAN off, so PAN is set on every exception entry to EL1.
     let mut sctlr: u64;
     unsafe {
         core::arch::asm!("mrs {}, SCTLR_EL1", out(reg) sctlr, options(nomem, nostack));
     }
     sctlr &= !(1 << 19); // WXN=0
-    sctlr |= 1 << 23; // SPAN=1
+    sctlr &= !(1 << 23); // SPAN=0
     unsafe {
         core::arch::asm!("msr SCTLR_EL1, {}", in(reg) sctlr, options(nomem, nostack));
         core::arch::asm!("isb", options(nomem, nostack));
-        // Clear PSTATE.PAN
-        core::arch::asm!(".inst 0xd500409f", options(nomem, nostack));
+        // PSTATE.PAN = 1 ("msr PAN, #1", encoded because the assembler may not
+        // know PAN): the kernel faults if it ever touches EL0 memory directly.
+        core::arch::asm!(".inst 0xd500419f", options(nomem, nostack));
         core::arch::asm!("isb", options(nomem, nostack));
     }
 
-    serial_println!("  Paging: T0SZ={}, WXN off, PAN off", t0sz);
+    // TCR_EL1.A1 = 0: the ASID comes from TTBR0, where each task's lives.
+    let tcr = tcr & !(1 << 22);
+    unsafe {
+        core::arch::asm!("msr TCR_EL1, {}", in(reg) tcr, options(nomem, nostack));
+        core::arch::asm!("isb", options(nomem, nostack));
+    }
+
+    let ram_va = core::ptr::addr_of!(TTBR0_ROOT) as u64;
+    if let Err(reason) = super::addrspace::init(ttbr0 & ADDR_MASK, t0sz, ram_va) {
+        panic!("paging: {reason}");
+    }
+
+    serial_println!(
+        "  Paging: T0SZ={}, WXN off, PAN on, user window {:#x}",
+        t0sz,
+        freshos_abi::USER_BASE
+    );
     ttbr0
-}
-
-/// Grant EL0 access to a range of physical addresses by patching the
-/// UEFI page table entries in-place.
-///
-/// Only the permission bits change, so the entries are rewritten in place and
-/// the TLB is invalidated afterwards. Call before the affected pages are in
-/// use by an EL0 task.
-pub fn grant_user_access(start: u64, size: u64) {
-    if size == 0 {
-        return;
-    }
-
-    let root = unsafe { TTBR0_ROOT };
-    let level = unsafe { START_LEVEL };
-    let end = start + size;
-
-    // Walk each 4 KiB page in the range
-    let mut addr = start & !0xFFF;
-    let mut patched = 0u32;
-    while addr < end {
-        if patch_leaf_entry(root, level, addr) {
-            patched += 1;
-        }
-        addr += 4096;
-    }
-
-    flush_tlb();
-
-    // Debug output removed — serial at 115200 baud is the bottleneck.
-    let _ = patched;
 }
 
 pub fn make_executable(start: u64, size: u64) {
@@ -122,11 +107,6 @@ pub fn make_executable(start: u64, size: u64) {
     }
 }
 
-/// The TTBR0 value (same for all tasks — no switching).
-pub fn user_ttbr0() -> u64 {
-    unsafe { TTBR0_ROOT }
-}
-
 /// No-op — all tasks share UEFI's page tables.
 #[inline]
 pub fn switch_ttbr0(_: u64) {}
@@ -134,45 +114,6 @@ pub fn switch_ttbr0(_: u64) {}
 // ---------------------------------------------------------------------------
 // Page table walker — find and patch a single leaf entry
 // ---------------------------------------------------------------------------
-
-/// Walk the page table for `va` and set AP=AP_RW_ALL on the leaf entry.
-///
-/// Writes the entry in place: permission-only changes don't need
-/// break-before-make. The caller must invalidate the TLB afterwards
-/// (`flush_tlb`); stale translations do persist, including under HVF.
-///
-/// Returns true if the entry was modified.
-fn patch_leaf_entry(table: u64, level: u32, va: u64) -> bool {
-    let shift = match level {
-        0 => 39,
-        1 => 30,
-        2 => 21,
-        3 => 12,
-        _ => return false,
-    };
-    let index = ((va >> shift) & 0x1FF) as usize;
-    let entry = read_entry(table, index);
-
-    if entry & VALID == 0 {
-        return false;
-    }
-
-    let is_table = (entry & TABLE) != 0 && level < 3;
-
-    if is_table {
-        let next = entry & ADDR_MASK;
-        patch_leaf_entry(next, level + 1, va)
-    } else {
-        let current_ap = entry & AP_MASK;
-        if current_ap == AP_RW_ALL {
-            return false;
-        }
-
-        let new_entry = (entry & !AP_MASK) | AP_RW_ALL;
-        write_entry(table, index, new_entry);
-        true
-    }
-}
 
 fn clear_xn_leaf_entry(table: u64, level: u32, va: u64) -> bool {
     let shift = match level {

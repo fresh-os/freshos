@@ -1,27 +1,28 @@
-/// aarch64 scheduler — preemptive round-robin with per-task page tables.
+/// aarch64 scheduler — preemptive round-robin with per-task address spaces.
 ///
-/// Supports both EL1 (kernel) and EL0 (user) tasks. Each user task has:
-///   - Its own TTBR0 page table (user-space address mapping)
-///   - A dedicated kernel stack (used during EL0→EL1 transitions)
-///   - A user stack (mapped USER in its page table)
+/// Supports both EL1 (kernel) and EL0 (user) tasks. Every task has a kernel
+/// stack, which holds its saved frame and serves its EL0→EL1 transitions.
+/// An EL0 task also owns an `AddressSpace`: its own top-level table, with its
+/// code, data and stack in the private user window. EL1 tasks run on the
+/// firmware's table.
 ///
 /// The timer ISR (exception.s) saves all registers, calls
-/// `scheduler_tick_arm(sp)`, and gets back the new SP. On task switch,
-/// we also switch TTBR0 and update SP_EL1 for the next EL0→EL1 transition.
+/// `scheduler_tick_arm(sp)`, and gets back the new SP. On a task switch the
+/// scheduler also points TTBR0 at the next task's table.
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
+
+use freshos_abi::{USER_BASE, USER_SIZE, USER_STACK_SIZE};
 
 use crate::frame_alloc;
 use crate::serial::serial_println;
 
+use super::addrspace::{AddressSpace, Perm, PAGE};
 use super::gic;
-use super::paging;
 use super::timer;
 
 pub const MAX_TASKS: usize = 16;
-const USER_STACK_SIZE: usize = 4096 * 4; // 16 KiB user stack
 const KERNEL_STACK_SIZE: usize = 4096 * 4; // 16 KiB kernel stack per task
-pub const USER_STACK_BYTES: u64 = USER_STACK_SIZE as u64;
 
 #[derive(Clone, Copy, PartialEq)]
 enum State {
@@ -31,26 +32,21 @@ enum State {
     Blocked,
 }
 
-#[derive(Clone, Copy)]
 struct Task {
-    sp: u64, // saved stack pointer (kernel stack, after save_all_regs)
-    user_stack_bottom: u64,
-    user_stack_pages: usize,
+    sp: u64, // saved frame (kernel stack, after save_all_regs)
     kernel_stack_bottom: u64,
     kernel_stack_pages: usize,
-    kernel_stack_top: u64, // top of per-task kernel stack (for SP_EL1)
-    ttbr0: u64,            // TTBR0_EL1 value (0 = use kernel page table)
+    ttbr0: u64, // TTBR0_EL1 to load when this task runs
+    space: Option<AddressSpace>,
     state: State,
 }
 
 const EMPTY_TASK: Task = Task {
     sp: 0,
-    user_stack_bottom: 0,
-    user_stack_pages: 0,
     kernel_stack_bottom: 0,
     kernel_stack_pages: 0,
-    kernel_stack_top: 0,
     ttbr0: 0,
+    space: None,
     state: State::Free,
 };
 
@@ -58,16 +54,12 @@ const EMPTY_TASK: Task = Task {
 struct PendingFree {
     kernel_stack_bottom: u64,
     kernel_stack_pages: usize,
-    user_stack_bottom: u64,
-    user_stack_pages: usize,
     used: bool,
 }
 
 const EMPTY_PENDING: PendingFree = PendingFree {
     kernel_stack_bottom: 0,
     kernel_stack_pages: 0,
-    user_stack_bottom: 0,
-    user_stack_pages: 0,
     used: false,
 };
 
@@ -90,17 +82,28 @@ fn pending_frees() -> *mut [PendingFree; MAX_TASKS] {
     PENDING_FREES.0.get()
 }
 
-fn allocate_slot(t: &[Task; MAX_TASKS]) -> usize {
-    for id in 1..MAX_TASKS {
-        if t[id].state == State::Free {
-            return id;
+/// TTBR0 for tasks without their own space: the firmware's table, ASID 0.
+static KERNEL_TTBR0: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Point TTBR0 at `ttbr0` if it isn't already. Kernel mappings are global
+/// and identical in every table, so the kernel keeps running across the
+/// switch; ASIDs mean no TLB flush is needed.
+fn activate(ttbr0: u64) {
+    let current: u64;
+    unsafe { core::arch::asm!("mrs {}, TTBR0_EL1", out(reg) current, options(nomem, nostack)) };
+    if current != ttbr0 {
+        unsafe {
+            core::arch::asm!("msr TTBR0_EL1, {}", "isb", in(reg) ttbr0, options(nostack));
         }
     }
-    panic!("too many tasks");
 }
 
-fn queue_pending_free(task: Task) {
-    if task.kernel_stack_pages == 0 && task.user_stack_pages == 0 {
+fn free_slot(t: &[Task; MAX_TASKS]) -> Option<usize> {
+    (1..MAX_TASKS).find(|&id| t[id].state == State::Free)
+}
+
+fn queue_pending_free(bottom: u64, pages: usize) {
+    if pages == 0 {
         return;
     }
 
@@ -108,10 +111,8 @@ fn queue_pending_free(task: Task) {
     for slot in pending.iter_mut() {
         if !slot.used {
             *slot = PendingFree {
-                kernel_stack_bottom: task.kernel_stack_bottom,
-                kernel_stack_pages: task.kernel_stack_pages,
-                user_stack_bottom: task.user_stack_bottom,
-                user_stack_pages: task.user_stack_pages,
+                kernel_stack_bottom: bottom,
+                kernel_stack_pages: pages,
                 used: true,
             };
             return;
@@ -141,11 +142,6 @@ fn reap_pending_frees(current_stack_ptr: u64) {
                     slot.kernel_stack_bottom,
                     slot.kernel_stack_pages,
                 )
-            };
-        }
-        if slot.user_stack_pages > 0 {
-            unsafe {
-                frame_alloc::deallocate_contiguous(slot.user_stack_bottom, slot.user_stack_pages)
             };
         }
         *slot = EMPTY_PENDING;
@@ -197,152 +193,25 @@ extern "C" fn scheduler_tick_arm(stack_ptr: u64) -> u64 {
 
     t[next].state = State::Running;
     CURRENT.store(next, Ordering::SeqCst);
-
-    // All tasks share UEFI's (patched) page tables — no TTBR0 switch needed.
+    activate(t[next].ttbr0);
 
     t[next].sp
 }
 
 /// Initialise the scheduler with task 0 (the boot/idle task).
 pub fn init(ttbr0: u64) {
+    KERNEL_TTBR0.store(ttbr0, Ordering::SeqCst);
     let t = unsafe { &mut *tasks() };
     for task in t.iter_mut() {
         *task = EMPTY_TASK;
     }
     t[0] = Task {
-        sp: 0,
-        user_stack_bottom: 0,
-        user_stack_pages: 0,
-        kernel_stack_bottom: 0,
-        kernel_stack_pages: 0,
-        kernel_stack_top: 0,
         ttbr0,
         state: State::Running,
+        ..EMPTY_TASK
     };
     COUNT.store(1, Ordering::SeqCst);
     CURRENT.store(0, Ordering::SeqCst);
-}
-
-/// Spawn a user-mode task (EL0) with its own page tables.
-///
-/// `extra_regions` are additional `(addr, size)` pairs to map as USER
-/// in the task's page table (e.g. the framebuffer, surfaces).
-pub fn spawn_user(entry: u64, extra_regions: &[(u64, u64)]) -> usize {
-    reap_pending_frees(0);
-    let t = unsafe { &mut *tasks() };
-    let id = allocate_slot(t);
-
-    // Allocate user stack
-    let user_stack_bottom =
-        frame_alloc::allocate_contiguous(USER_STACK_SIZE / 4096).expect("user stack");
-    let user_stack_top = user_stack_bottom + USER_STACK_SIZE as u64;
-
-    // Allocate kernel stack (used during EL0→EL1 transitions)
-    let kernel_stack_bottom =
-        frame_alloc::allocate_contiguous(KERNEL_STACK_SIZE / 4096).expect("kernel stack");
-    let kernel_stack_top = kernel_stack_bottom + KERNEL_STACK_SIZE as u64;
-
-    // Grant EL0 access to user stack, code, and extra regions
-    paging::grant_user_access(user_stack_bottom, USER_STACK_SIZE as u64);
-    let code_base = entry & !0xFFF; // page-align
-    paging::grant_user_access(code_base, 8 * 1024 * 1024); // 8 MiB of code/data
-    for &(addr, size) in extra_regions {
-        if size > 0 {
-            paging::grant_user_access(addr, size);
-        }
-    }
-
-    let ttbr0 = paging::user_ttbr0();
-
-    // Seed the kernel stack with a fake exception frame.
-    // restore_all_regs will pop 272 bytes, then eret enters EL0.
-    //
-    // Layout:
-    //   [sp+0..232]  x0-x29 = 0
-    //   [sp+240]     x30 (LR) = 0
-    //   [sp+248]     SP_EL0 = user_stack_top (user stack pointer)
-    //   [sp+256]     ELR_EL1 = entry (where to start executing)
-    //   [sp+264]     SPSR_EL1 = 0x0 (EL0t, IRQs enabled)
-    let frame_base = kernel_stack_top - 272;
-    unsafe {
-        let p = frame_base as *mut u8;
-        core::ptr::write_bytes(p, 0, 272);
-
-        let slots = frame_base as *mut u64;
-        // SP_EL0 = user stack top
-        *slots.add(31) = user_stack_top;
-        // ELR_EL1 = entry point
-        *slots.add(32) = entry;
-        // SPSR_EL1 = EL0t (0x0), all DAIF clear (interrupts enabled)
-        *slots.add(33) = 0x0000_0000;
-    }
-
-    t[id] = Task {
-        sp: frame_base,
-        user_stack_bottom,
-        user_stack_pages: USER_STACK_SIZE / 4096,
-        kernel_stack_bottom,
-        kernel_stack_pages: KERNEL_STACK_SIZE / 4096,
-        kernel_stack_top,
-        ttbr0,
-        state: State::Ready,
-    };
-    COUNT.store(task_count(), Ordering::SeqCst);
-
-    serial_println!(
-        "    task {} @ {:#x}, ustack {:#x}, kstack {:#x}, ttbr0 {:#x}",
-        id,
-        entry,
-        user_stack_bottom,
-        kernel_stack_bottom,
-        ttbr0,
-    );
-    id
-}
-
-pub fn spawn_user_pregranted(entry: u64, user_stack_bottom: u64) -> usize {
-    reap_pending_frees(0);
-    let t = unsafe { &mut *tasks() };
-    let id = allocate_slot(t);
-    let user_stack_top = user_stack_bottom + USER_STACK_SIZE as u64;
-
-    let kernel_stack_bottom =
-        frame_alloc::allocate_contiguous(KERNEL_STACK_SIZE / 4096).expect("kernel stack");
-    let kernel_stack_top = kernel_stack_bottom + KERNEL_STACK_SIZE as u64;
-
-    let ttbr0 = paging::user_ttbr0();
-    let frame_base = kernel_stack_top - 272;
-    unsafe {
-        let p = frame_base as *mut u8;
-        core::ptr::write_bytes(p, 0, 272);
-
-        let slots = frame_base as *mut u64;
-        *slots.add(31) = user_stack_top;
-        *slots.add(32) = entry;
-        *slots.add(33) = 0x0000_0000;
-    }
-
-    t[id] = Task {
-        sp: frame_base,
-        user_stack_bottom,
-        user_stack_pages: 0,
-        kernel_stack_bottom,
-        kernel_stack_pages: KERNEL_STACK_SIZE / 4096,
-        kernel_stack_top,
-        ttbr0,
-        state: State::Ready,
-    };
-    COUNT.store(task_count(), Ordering::SeqCst);
-
-    serial_println!(
-        "    task {} @ {:#x}, ustack {:#x}, kstack {:#x}, ttbr0 {:#x}",
-        id,
-        entry,
-        user_stack_bottom,
-        kernel_stack_bottom,
-        ttbr0,
-    );
-    id
 }
 
 /// Spawn a kernel-mode task (EL1) — used when EL0 isn't available (HVF).
@@ -355,7 +224,7 @@ pub fn spawn(entry: fn() -> !) -> usize {
 pub fn spawn_with_arg(entry_addr: u64, arg0: u64) -> usize {
     reap_pending_frees(0);
     let t = unsafe { &mut *tasks() };
-    let id = allocate_slot(t);
+    let id = free_slot(t).expect("too many tasks");
 
     let stack_bottom =
         frame_alloc::allocate_contiguous(KERNEL_STACK_SIZE / 4096).expect("task stack");
@@ -371,16 +240,13 @@ pub fn spawn_with_arg(entry_addr: u64, arg0: u64) -> usize {
         *slots.add(33) = 0x0000_0005; // SPSR: EL1h, IRQs enabled
     }
 
-    let ttbr0 = paging::user_ttbr0();
     t[id] = Task {
         sp: frame_base,
-        user_stack_bottom: 0,
-        user_stack_pages: 0,
         kernel_stack_bottom: stack_bottom,
         kernel_stack_pages: KERNEL_STACK_SIZE / 4096,
-        kernel_stack_top: stack_top,
-        ttbr0,
+        ttbr0: KERNEL_TTBR0.load(Ordering::SeqCst),
         state: State::Ready,
+        ..EMPTY_TASK
     };
     COUNT.store(task_count(), Ordering::SeqCst);
 
@@ -392,6 +258,66 @@ pub fn spawn_with_arg(entry_addr: u64, arg0: u64) -> usize {
         stack_top
     );
     id
+}
+
+#[derive(Debug)]
+pub enum SpawnError {
+    NoSlot,
+    OutOfMemory,
+    BadImage(&'static str),
+}
+
+/// Start an EL0 task from an ELF image, in its own address space. `arg0` and
+/// `arg1` arrive in x0 and x1 at the entry point (freshos-rt passes them to
+/// `main` as the handle count and the service's argument).
+pub fn spawn_el0(image: &[u8], arg0: u64, arg1: u64) -> Result<usize, SpawnError> {
+    reap_pending_frees(0);
+    let t = unsafe { &mut *tasks() };
+    let id = free_slot(t).ok_or(SpawnError::NoSlot)?;
+
+    // The ASID is the task slot: unique among live tasks, and flushed when
+    // the space is dropped, before the slot can be reused.
+    let mut space = AddressSpace::new(id as u16).map_err(|_| SpawnError::OutOfMemory)?;
+    let entry = crate::elf::load_into(image, &mut space).map_err(SpawnError::BadImage)?;
+
+    // Stack at the top of the window. The page below it is never mapped:
+    // that's the guard page.
+    let stack_top = USER_BASE + USER_SIZE;
+    let mut va = stack_top - USER_STACK_SIZE;
+    while va < stack_top {
+        space.map_new_page(va, Perm::ReadWrite).map_err(|_| SpawnError::OutOfMemory)?;
+        va += PAGE;
+    }
+    space.publish();
+
+    let kernel_stack_bottom = frame_alloc::allocate_contiguous(KERNEL_STACK_SIZE / 4096)
+        .ok_or(SpawnError::OutOfMemory)?;
+    let kernel_stack_top = kernel_stack_bottom + KERNEL_STACK_SIZE as u64;
+
+    // Seed a frame for restore_all_regs + eret into EL0.
+    let frame_base = kernel_stack_top - 272;
+    unsafe {
+        core::ptr::write_bytes(frame_base as *mut u8, 0, 272);
+        let slots = frame_base as *mut u64;
+        *slots.add(0) = arg0; // x0
+        *slots.add(1) = arg1; // x1
+        *slots.add(31) = stack_top; // SP_EL0
+        *slots.add(32) = entry; // ELR_EL1
+        *slots.add(33) = 0; // SPSR_EL1: EL0t, interrupts unmasked
+    }
+
+    let ttbr0 = space.ttbr0();
+    t[id] = Task {
+        sp: frame_base,
+        kernel_stack_bottom,
+        kernel_stack_pages: KERNEL_STACK_SIZE / 4096,
+        ttbr0,
+        space: Some(space),
+        state: State::Ready,
+    };
+    COUNT.store(task_count(), Ordering::SeqCst);
+    serial_println!("    task {} el0 asid={} entry={:#x}", id, id, entry);
+    Ok(id)
 }
 
 /// Start the scheduler: enable the timer and interrupts.
@@ -440,18 +366,27 @@ pub fn unblock(task_id: usize) {
     }
 }
 
-pub fn terminate_current_with_reason(reason: u64) -> ! {
+/// Remove the current task: record its exit, free its address space, and
+/// queue its kernel stack. The caller is still running on that stack and
+/// must switch away (a syscall returns through the scheduler; a fault waits
+/// for the next tick).
+pub fn retire_current(reason: u64) {
     let cur = CURRENT.load(Ordering::SeqCst);
-    let t = unsafe { &mut *tasks() };
-
-    if cur != 0 {
-        let task = t[cur];
-        t[cur] = EMPTY_TASK;
-        queue_pending_free(task);
-        crate::init_abi::task_exited(cur, reason);
-        COUNT.store(task_count(), Ordering::SeqCst);
+    if cur == 0 {
+        return;
     }
+    let t = unsafe { &mut *tasks() };
+    let mut task = core::mem::replace(&mut t[cur], EMPTY_TASK);
+    // Never keep running on a table that is about to be freed.
+    activate(KERNEL_TTBR0.load(Ordering::SeqCst));
+    drop(task.space.take());
+    queue_pending_free(task.kernel_stack_bottom, task.kernel_stack_pages);
+    crate::init_abi::task_exited(cur, reason);
+    COUNT.store(task_count(), Ordering::SeqCst);
+}
 
+pub fn terminate_current_with_reason(reason: u64) -> ! {
+    retire_current(reason);
     loop {
         super::interrupt_enable();
         super::halt();
