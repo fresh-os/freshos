@@ -14,22 +14,26 @@ FreshOS is a Rust microkernel that boots from UEFI on **aarch64**. Its guiding i
 
 ## How it runs today
 
+Services run at **EL0, each in its own address space**, on QEMU `virt` with HVF. The kernel starts only `init`; `init` starts everything else from its table and restarts what it supervises. Five built-ins (keyboard, compositor, shell, dashboard and MCP bridge) still run at **EL1** inside the kernel until each moves out under its own spec (decision 0006).
+
 | | QEMU `virt` + HVF (works) | Raspberry Pi 4 (not yet booted) |
 |---|---|---|
 | Purpose | Day-to-day development loop on Apple Silicon | Reference hardware |
-| Desktop tasks | `kernel/src/arm_tasks.rs`, run at **EL1** with direct function calls | Should run at EL0 with per-task page tables |
+| EL0 services | `init`, `ping`, `pong`, `pulse`, `fault` | Same binaries; PAN, I-cache maintenance and the GICv2 path are unverified there |
+| Built-ins | `kernel/src/arm_tasks.rs` and `mcp.rs`, at EL1 | Same |
 | Input | Serial UART only: type into the terminal running QEMU | USB keyboard on the VL805 xHCI controller (needs a PCIe driver, then xHCI) |
 | Display | Composited to `ramfb` (virtio-GPU scanout is invisible under `-display cocoa`) | UEFI GOP framebuffer from the firmware |
 
-On HVF the desktop runs at EL1 because HVF traps the `tlbi` instructions that per-task user page tables need. The one exception is the `fault` service, a narrow **EL0 proof path**: real `SVC` entry and contained lower-EL faults, but a shared, patched `TTBR0`. It does not yet isolate each task. Don't describe FreshOS as isolated.
-
-`.cargo/config.toml` makes `aarch64-unknown-uefi` the default build target and uses `build-std` for `core` and `alloc`.
+`.cargo/config.toml` makes `aarch64-unknown-uefi` the default build target, uses `build-std` for `core` and `alloc`, and links `aarch64-unknown-none` userbins at `0x4_0000_0000`.
 
 ## Commands
 
 The toolchain is nightly, pinned by `rust-toolchain.toml` (channel only, no date). The run scripts call `rustup run nightly`. If a build reports "can't find crate for core", check that nothing has overridden the toolchain.
 
 ```bash
+./test.sh                   # Build everything and run every test (about two minutes)
+./test.sh -v -k supervision # Arguments go to unittest: -v for names, -k to filter
+
 ./run-arm.sh [--release]    # Builds the kernel and all userbins, stages esp-arm/, boots QEMU aarch64 + HVF (cocoa window, serial on stdio)
 ./run-demo.sh               # Same as run-arm.sh; exits with an error on hosts other than Apple Silicon
 ./run-arm.sh -display none  # Headless: extra arguments go to QEMU, and the last -display wins
@@ -41,64 +45,112 @@ claude mcp add freshos -- nc -U "$PWD/mcp.sock"
 # Build one piece. Always pass both --package and --target, the way run-arm.sh does.
 rustup run nightly cargo build --package freshos-kernel --target aarch64-unknown-uefi
 rustup run nightly cargo build --package freshos-kernel --target aarch64-unknown-uefi --no-default-features --features board-rpi4   # Pi 4 kernel
-rustup run nightly cargo build --package freshos-pong   --target aarch64-unknown-none   # same for init, pulse, fault
+rustup run nightly cargo build --package freshos-pong   --target aarch64-unknown-none   # any userbin
 
 rustup run nightly cargo clippy --package freshos-kernel
 ```
 
-- **Tests:** there are none. To verify a change, boot it and read the serial log. Every boot stage prints a line, from `Boot init: N bytes from ESP` through to `Scheduler started`.
+`run-arm.sh` reads these environment overrides. The test harness uses them to boot each test class in private directories:
+
+| Variable | Effect | Default |
+|---|---|---|
+| `ESP_DIR` | Where to stage the ESP | `./esp-arm` |
+| `MCP_SOCK` | The MCP bridge's Unix socket; keep it short (macOS allows about 104 bytes) | `./mcp.sock` |
+| `EXTRA_ELFS` | Extra userbin packages, without `freshos-`, to build and stage | none |
+| `OMIT_ELFS` | Userbins to build but leave off the ESP, such as `init` | none |
+| `EXTRA_FILES_DIR` | Files copied as-is into `\EFI\FreshOS\`, such as a malformed ELF | none |
+| `OVMF_VARS` | The writable UEFI variable store | `./edk2-arm-vars.fd` |
+| `SKIP_BUILD=1` | Stage what is already built | build first |
+| `BUILD_ONLY=1` | Build, then exit without staging or booting | boot |
+| `FRESHOS_ACCEL` | `hvf`, or `tcg` for software emulation (`-cpu max`) | `hvf` |
+
+- **Tests:** `tests/` holds Python 3.14 `unittest` suites, standard library only. `tests/harness.py` boots QEMU through `run-arm.sh` once per test class, captures the serial log, and talks to the MCP bridge. Assert on MCP views and log lines, always with a timeout. `tests/test_abi.py` runs `freshos-abi`'s Rust unit tests on the host. Every change lands with its tests, and a test must fail when its claim is false: never let one pass without checking anything.
 - **Warnings:** the tree is not warning-clean under `build` or `clippy`. Don't add new warnings. Clean up existing ones only when that is your task.
 - **Firmware:** comes from `brew install qemu` (`/opt/homebrew/share/qemu/edk2-*`). QEMU loads it through pflash, not `-bios`. `run-arm.sh` copies a writable `edk2-arm-vars.fd` into the repo on first run.
 
 ## Architecture
 
+The design is in `docs/plans/2026-09-26-el0-isolation-design.md`. This section is the map.
+
 ### Kernel layout
 
 - **Portable modules in `kernel/src/`:**
-  - `ipc`, `frame_alloc`, `heap`, `framebuffer`, `font`/`font_aa`, `metrics`, `task_names`, `serial`
-  - `scripting` (Rhai, `no_std`)
-  - `elf`, `init_abi` and `service_abi`, used by the service loader
-  - `arm_tasks`, the desktop
-- **`kernel/src/arch/aarch64/board/`:** the board layer. One file per board (`qemu_virt.rs`, `rpi4.rs`) holding its addresses: PL011 UART, GIC, and the virtio-mmio window if any. Exactly one `board-*` cargo feature selects it (`board-qemu-virt` is the default), and `compile_error!` rejects zero or two.
-- **`kernel/src/arch/aarch64/`:** exceptions, GIC, timer, context switch and scheduler, paging, syscalls and a virtio-GPU driver. It is re-exported as `arch::*`, and portable code calls through `arch::`.
-- **`main.rs`:** the UEFI `#[entry]`. It picks the largest graphics mode up to 1920×1200, loads the service ELFs from the ESP, exits boot services, then brings up the kernel and starts the scheduler.
+  - `syscalls` (every EL0 syscall), `handles`, `ipc`, `registry`, `boot_images`, `elf`
+  - `frame_alloc`, `heap`, `framebuffer`, `font`/`font_aa`, `metrics`, `serial`, `scripting` (Rhai, `no_std`)
+  - `arm_tasks` and `mcp`, the EL1 built-ins. The compositor draws the chrome (menu bar, taskbar and stats overlay); `../docs/decisions/chrome-as-services.md` plans to move each piece into its own service.
+- **`kernel/src/arch/aarch64/board/`:** the board layer. One file per board (`qemu_virt.rs`, `rpi4.rs`) holding its addresses: PL011 UARTs, GIC, and the virtio-mmio window if any. Exactly one `board-*` cargo feature selects it (`board-qemu-virt` is the default), and `compile_error!` rejects zero or two.
+- **`kernel/src/arch/aarch64/`:** exceptions, GIC, timer, the scheduler (`context`), address spaces (`addrspace`), system-register setup (`paging`), the syscall entry (`syscall`) and a virtio-GPU driver. It is re-exported as `arch::*`, and portable code calls through `arch::`.
+- **`main.rs`:** the UEFI `#[entry]`. It picks the largest graphics mode up to 1920×1200, reads every `*.ELF` in `\EFI\FreshOS\` into memory (`boot_images`), exits boot services, brings up the kernel, and starts `init`. **The kernel requires only `INIT.ELF`** (decision 0006). Without it, the kernel prints `INIT.ELF missing from \EFI\FreshOS — nothing to run` and halts.
 
-The chrome (menu bar, taskbar and stats overlay) is drawn inside the compositor task in `arm_tasks.rs`. `../docs/decisions/chrome-as-services.md` plans to move each piece into its own service.
+### Address spaces and protection
 
-### External services (`userbins/`)
+- **One table per EL0 task.** Each task's top-level table copies the kernel's top-level entries, so the kernel (RAM and devices, EL1-only) is identical in every space. Slot 16, the 1 GiB window at `0x4_0000_0000` (`USER_BASE`), is private: the task's code, data and a 64 KiB stack at the top, with an unmapped guard page below it.
+- **ASID = task slot.** User pages are not-global (`nG`), so switching tasks needs no TLB flush. A space's drop flushes its ASID before the slot can be reused.
+- **`TaskRef` = slot + generation.** Each slot's generation goes up on every spawn and never repeats, so a `TaskRef` never names two tasks. Exit notices and the registry use it.
+- **W^X per page.** The ELF loader maps code read+execute and data read+write, never both. It refuses a segment that asks for both, or one outside the window.
+- **The kernel never dereferences a user virtual address.** `copy_from_user`/`copy_to_user` (`addrspace.rs`) check the whole range against the task's own table, then copy through the kernel's map of the physical frame.
+- **PAN** is detected at boot and turned on where the CPU has it (it does under QEMU with HVF). **The Pi 4's Cortex-A72 (ARMv8.0) has no PAN**; there the copy discipline is the only enforcement.
+- **I-cache maintenance** (`paging::sync_icache`) runs after the loader writes code. Apple cores don't need it; the Pi 4 does.
+- A fault at EL0 terminates only that task, with reason `fault`.
 
-`init`, `pong`, `pulse` and `fault` are `#![no_std]`, `#![no_main]` ELFs built for `aarch64-unknown-none`. The flow is:
+### Tasks and scheduling (`arch/aarch64/context.rs`)
 
-1. `run-arm.sh` copies each one to `esp-arm/EFI/FreshOS/<NAME>.ELF`.
-2. `main.rs` loads each file through UEFI (`load_esp_file`) *before* `exit_boot_services`. If a file is missing, the kernel uses a built-in stand-in.
-3. `init` is the supervisor. It enumerates services, autostarts them, and restarts supervised ones after they exit.
+- `MAX_TASKS` is 16 slots. Slot 0 is the boot/idle task.
+- **Exception frame:** `FRAME_SIZE` is 800 bytes. Every exception saves the general registers and, eagerly, the FP/SIMD state (q0–q31, FPCR, FPSR). `enable_fp` sets `CPACR_EL1.FPEN` at boot.
+- **Kernel stacks:** 32 KiB per task. A canary at the bottom is checked on every switch, and an overrun panics naming the task. The MCP `tasks` view shows each task's `stack_peak_bytes`. There are no guard pages yet.
+- **Direct hand-off:** a send to a waiting receiver runs that receiver next. A blocking `recv` switches away at once.
+- **Sender-return:** if the hand-off target then blocks while its donor is still Ready, the donor runs next. Otherwise the choice is round-robin. Every timer tick clears the hand-off and rotates, so fairness holds at tick granularity (1 ms).
+- The ping/pong median round trip was 10–28 µs across four runs on QEMU with HVF (`tests/test_latency.py`), down from about 10.8 ms before hand-off.
 
-A service's entry point is `_start(api: *const InitApi | *const ServiceApi)`. That argument is a **table of `extern "C"` function pointers**, not a syscall interface. **The ABI structs are copied by hand.** Each `#[repr(C)]` type in `kernel/src/init_abi.rs` and `kernel/src/service_abi.rs` is redeclared in every userbin. No shared crate exists. When you change a layout, change every copy in the same commit.
+### The ABI, the runtime and the syscalls
 
-To add a service, touch all of these:
+- **`freshos-abi` (`lib/abi/`)** defines everything that crosses the boundary, once: syscall numbers, `Error`, `Message`, `Handle`, `Rights`, `SpawnRequest`, `Grant`, `TaskRef`, `ExitReason`, message tags and the window constants. The kernel uses it too. Never redeclare these types by hand.
+- **`freshos-rt` (`lib/rt/`)** is all a userbin links: `entry!(main)`, where `main(Startup) -> !` receives its granted handles and its table argument; a panic handler that logs and exits with `panic`; safe syscall wrappers returning `Result`; and `log!`. Userbins have no allocator. All `svc` assembly is in `lib/rt/src/syscall.rs`.
+- **Syscalls** (`svc #0`, number in `x8`, arguments in `x0`–`x5`, result in `x0`; negative results are `Error`):
 
-- the workspace `members` list
-- the build and copy steps in `run-arm.sh`
-- a `load_esp_file` call in `main`
-- a `SERVICE_*` id and record in `init_abi.rs`
+| # | Syscall | Notes |
+|---|---|---|
+| 0 | `send(h, *msg)` | Needs `SEND`. The kernel stamps `sender`. Hands off to a waiting receiver. `Full` when 16 messages are queued. |
+| 1 | `recv(h, *msg, deadline_ns)` | Needs `RECV`. Blocks; `Timeout` after a non-zero deadline (checked each tick). |
+| 2 | `try_recv(h, *msg)` | As `recv`, but `WouldBlock` instead of waiting. |
+| 3 | `yield()` | |
+| 4 | `exit(reason)` | `clean` or `panic`; `fault` is the kernel's to give. |
+| 5 | `time_ns()` | Nanoseconds since boot. |
+| 6 | `log(ptr, len)` | One line, at most 256 bytes, prefixed `[name]` by the kernel. Control characters become `?`, so no task can forge another's line. |
+| 7 | `channel_create()` | `init` only. Returns a handle with `SEND` and `RECV`. |
+| 8 | `spawn(*request)` | `init` only. Starts a binary by name with the listed grants as handles 0.., and returns the packed `TaskRef`. |
 
-The spawn dispatch in `init_abi.rs` calls `task_names::register`. That call gives the task the name the flow view shows.
+- **Handles** (`handles.rs`): each task has a 16-slot table; a handle is a slot index naming a channel and its rights. Tasks never see channel numbers. `SEND` grants are copied. **Each channel has one receiving process:** a `RECV` grant moves out of `init`'s handle into the child and returns home when the child exits, and messages queued meanwhile wait for the next receiver. Granting a `RECV` twice, or after it has moved, fails with `ReceiverTaken`.
+
+### `init`, the registry and supervision
+
+- **The registry keeps the facts; `init` keeps the policy.** `registry.rs` records every spawn and exit first-hand: names, generations, start and exit counts, and the last exit reason. The MCP views, the flow view and the shell read it, so none of them trusts `init`'s account.
+- **`init`'s table** (`userbins/init/src/main.rs`) lists each service: name, binary, grants, argument, restart delay, and whether it is optional. An optional service whose binary is absent is skipped silently; any other refused spawn is logged, and `init` carries on.
+- **`init` has one inbox, channel 2.** The kernel sends `TASK_EXITED` there as sender 0, carrying the task id, reason and generation, and `init` matches it against the exact `TaskRef` it spawned. Restart requests (the shell's `restart <name>`) arrive on the same inbox. When the inbox is full, kernel notices wait in a bounded backlog and move in, in order.
+- If `init` exits or faults, the kernel prints why and halts.
+- **Built-ins:** table entries with the binary `builtin:<name>` start the in-kernel EL1 built-ins, so `init` owns all startup policy. They hold no handles and use raw channel numbers (0: keyboard events, 1: shell keys). Each leaves in its own spec, which deletes its entry.
+
+### Adding a userbin
+
+1. Create a package under `userbins/<name>/` named `freshos-<name>`, depending on `freshos-rt` only, and add it to the workspace `members`.
+2. Add it to `USERBINS` in `run-arm.sh`. A test-only userbin goes in `TEST_ELFS` in `tests/harness.py` instead.
+3. Add an entry to `init`'s table with its grants. Its ESP name is the package name without `freshos-` or hyphens, upper-cased and cut to eight characters, plus `.ELF` (`probe-chan` is `PROBECHA.ELF`). Mark test-only entries `optional`.
 
 ### MCP bridge (`kernel/src/mcp.rs`)
 
-A built-in service, `mcp`, that speaks MCP's stdio transport (newline-delimited JSON-RPC) over the board's second PL011 UART (`board::MCP_UART_BASE`; QEMU only for now). `run-arm.sh` exposes that UART as `mcp.sock`. It offers five read-only views, each as a tool and as a resource at `freshos://<name>`: `system`, `services`, `tasks`, `message_trace` and `metrics`. Decision 0005 governs it: no write tools until capabilities exist, and never a path around them. It currently runs at EL1 and reads kernel state directly, like the rest of the desktop on this path.
+A built-in service, `mcp`, that speaks MCP's stdio transport (newline-delimited JSON-RPC) over the board's second PL011 UART (`board::MCP_UART_BASE`; QEMU only for now). `run-arm.sh` exposes that UART as `mcp.sock`. It offers five read-only views, each as a tool and as a resource at `freshos://<name>`: `system`, `services`, `tasks`, `message_trace` and `metrics`. Decision 0005 governs it: no write tools until capabilities exist, and never a path around them. It runs at EL1 and reads kernel state directly until it moves out.
 
 ### IPC and observability
 
-- `ipc.rs`: bounded channels carry a type tag and 32 bytes of inline payload. `send` never blocks. `recv` blocks and wakes when a message arrives. Interrupts are masked between the empty check and the sleep (`arch::block_current_task`), so a wakeup cannot be lost.
+- `ipc.rs`: bounded channels of 16 messages, each a type tag and 32 bytes of inline payload.
 - Every send is recorded in a 64-entry trace ring. The destination is attributed through the channel's consumer, even when delivery was buffered.
-- The dashboard's live message-flow diagram (OBS.1, in `arm_tasks.rs`) draws that trace as nodes and arcs, labelled from the kernel-owned `task_names` registry. Keep the identities it shows honest: a name must come from the kernel, never be guessed by the viewer.
-- `metrics.rs` feeds the stats overlay: latency histograms and damage rectangles.
+- The dashboard's live message-flow diagram (OBS.1, in `arm_tasks.rs`) draws that trace as nodes and arcs, labelled from the registry. Keep the identities it shows honest: a name must come from the kernel, never be guessed by the viewer.
+- `metrics.rs` feeds the stats overlay and MCP: latency histograms, damage rectangles, and `ipc_delivery` (send to receipt, for every message).
 
 ### Memory
 
 - `frame_alloc`: a bitmap over the UEFI memory map.
-- `heap`: a 1 MiB linked-list allocator. It exists and is used; Rhai needs `alloc`. Older docs that say "no post-boot heap" are stale.
+- `heap`: a 1 MiB linked-list allocator for the kernel. Rhai needs `alloc`.
 
 ## Gotchas
 

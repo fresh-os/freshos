@@ -2,7 +2,7 @@
 title: "spec: EL0 isolation foundation (rung 1, first slice)"
 type: spec
 date: 2026-09-26
-status: proposed
+status: implemented
 ---
 
 # EL0 isolation foundation: design
@@ -84,7 +84,7 @@ These automated tests pass:
    count is visible over MCP.
 8. The median ping/pong round trip over 100 exchanges is under 100 µs on
    QEMU with HVF, against a baseline recorded before hand-off lands (about
-   14.5 ms today). If 100 µs proves unreachable, investigate and record why;
+   10.8 ms). If 100 µs proves unreachable, investigate and record why;
    don't silently relax the number.
 9. There are no built-in fallbacks. Booting without `INIT.ELF` prints the
    missing-init message and halts. Booting without `PONG.ELF` starts
@@ -111,12 +111,13 @@ clearly on an older interpreter.
   - boots QEMU headless;
   - captures the serial log;
   - provides a small MCP client over the socket;
-  - offers helpers: `wait_for_log(pattern, timeout)`, `services()`,
-    `metrics()`, `wait_until(condition, timeout)`.
+  - offers helpers: `wait_for_log(pattern, timeout)`, `find_logs(pattern)`,
+    `services()`, `mcp().view(name)`, `wait_until(condition, timeout)`.
 - `tests/test_*.py`: one file per area (boot, isolation, channels,
-  supervision, latency). Each file boots once and shares the boot across its
-  tests.
-- `./test.sh`: builds everything, then runs `python3 -m unittest discover tests`.
+  supervision, latency). Each test class boots once and shares the boot
+  across its tests.
+- `./test.sh` runs `python3 -m unittest discover tests`; the harness builds
+  everything once per run.
 
 **One definition of how FreshOS boots.** `run-arm.sh` gains optional
 environment overrides, and the harness calls it rather than keeping its own
@@ -125,7 +126,9 @@ QEMU command line:
 - `ESP_DIR`: where to stage the ESP;
 - `MCP_SOCK`: the MCP socket path. It must be short: Unix socket paths are
   limited to about 104 characters;
-- `EXTRA_ELFS`: extra binaries to stage, for test-only services.
+- `EXTRA_ELFS`: extra binaries to stage, for test-only services;
+- `OMIT_ELFS`, `EXTRA_FILES_DIR`, `OVMF_VARS`, `SKIP_BUILD` and `BUILD_ONLY`,
+  so each test class can boot its own ESP (see `AGENTS.md`).
 
 The harness passes `-display none` and captures stdout as the serial log.
 `FRESHOS_ACCEL=tcg` selects QEMU's software emulation instead of HVF, so CI
@@ -155,7 +158,8 @@ crosses the kernel/user boundary. The kernel depends on it too: its IPC
 - syscall numbers;
 - `Error`, a `#[repr(i64)]` enum returned as negative values: `NoSuchSyscall`,
   `NoSuchHandle`, `NoRight`, `BadPointer`, `WouldBlock`, `Timeout`,
-  `NotFound`, `NotPermitted`, `TableFull`, `ReceiverTaken`;
+  `NotFound`, `NotPermitted`, `TableFull`, `ReceiverTaken`, `Full`,
+  `Invalid`, `OutOfMemory`;
 - `Message`: `u32` tag, `u16` sender, `u16` length, `[u64; 4]` payload,
   unchanged from today. The kernel always overwrites `sender`;
 - `Handle(u32)`, and the rights `SEND` and `RECV`;
@@ -167,8 +171,9 @@ crosses the kernel/user boundary. The kernel depends on it too: its IPC
 
 **`freshos-rt`** (`lib/rt/`) is what a userbin links against:
 
-- `freshos_rt::entry!(main)` generates `_start` and passes `main` the
-  handles it was granted, in table order (`StartupHandles`);
+- `freshos_rt::entry!(main)` generates `_start` and passes `main` a
+  `Startup`: the handles it was granted, in table order, and its table
+  argument;
 - a panic handler that logs the message and exits with `Panic`;
 - safe syscall wrappers returning `Result<_, Error>`: `send`, `recv`,
   `recv_until`, `try_recv`, `yield_now`, `exit`, `time_ns`, `log`, and, for
@@ -221,6 +226,8 @@ Every task's address space
 - A segment outside the window is rejected.
 - No relocation support is needed, which removes today's fragility of
   moving images without relocating them.
+- After writing code, the loader cleans the D-cache and invalidates the
+  I-cache. Apple cores don't need it; the Pi 4's Cortex-A72 does.
 
 **Stacks.**
 
@@ -236,19 +243,21 @@ Every task's address space
 
 **Switching.** The scheduler loads the next task's table and ASID into
 `TTBR0_EL1`. Kernel mappings are global; user mappings are marked
-not-global (`nG`), so they're tagged with the ASID. ASIDs are allocated from
-1 to `MAX_TASKS`. When a task exits, `tlbi aside1` flushes its ASID before
-the number is reused, and its page-table and data frames are freed. The
+not-global (`nG`), so they're tagged with the ASID. A task's ASID is its
+slot number. When a task exits, `tlbi aside1is` flushes its ASID before
+the slot is reused, and its page-table and data frames are freed. The
 kernel ensures `TCR_EL1.A1 = 0`, so the ASID comes from `TTBR0`. Built-in
 EL1 tasks run on the kernel-only table.
 
-**PAN on.** PAN ("Privileged Access Never") makes the CPU fault if EL1 code
-touches EL0 memory. The kernel currently turns it off; this spec turns it
-back on (`PSTATE.PAN = 1`, `SCTLR_EL1.SPAN = 0`, so it's also set on every
-exception entry). The only code that reads or writes user memory is the pair
-of copy helpers in section 4. They copy through the kernel's map of the
-physical frames the task's own table points to, never through the user
-address, so PAN is never lifted.
+**PAN where the CPU has it.** PAN ("Privileged Access Never") makes the CPU
+fault if EL1 code touches EL0 memory. The kernel used to turn it off. It now
+detects it at boot (`ID_AA64MMFR1_EL1.PAN`) and, where present, turns it on
+(`PSTATE.PAN = 1`, `SCTLR_EL1.SPAN = 0`, so it's also set on every exception
+entry); it is on under QEMU with HVF. The Pi 4's Cortex-A72 is ARMv8.0 and
+has no PAN, so there the rule below is the only enforcement. The only code
+that reads or writes user memory is the pair of copy helpers in section 4.
+They copy through the kernel's map of the physical frames the task's own
+table points to, never through the user address, so PAN is never lifted.
 
 **Memory type.** User pages use the same memory attributes the firmware
 uses for RAM, read from its mapping of the kernel image at boot.
@@ -284,7 +293,7 @@ process may share its receive right.
 | 1 | `recv(h, *msg, deadline_ns)` | Wait for a message, until `deadline_ns` if non-zero. Returns `Timeout` if the deadline passes. | `h` has `RECV`; `msg` writable |
 | 2 | `try_recv(h, *msg)` | As `recv`, but returns `WouldBlock` instead of waiting | As `recv` |
 | 3 | `yield()` | Give up the CPU | – |
-| 4 | `exit()` | Exit with reason `Clean` | – |
+| 4 | `exit(reason)` | Exit with reason `Clean`, or `Panic` from the runtime's panic handler | A requested `Fault`, or any other value, counts as `Clean`: `Fault` is the kernel's to give |
 | 5 | `time_ns()` | Nanoseconds since boot | – |
 | 6 | `log(ptr, len)` | Write a log line | Text readable; capped at 256 bytes. The kernel prefixes the task's registered name. |
 | 7 | `channel_create()` | New channel; returns a handle with `SEND` and `RECV` | Caller is `init` |
@@ -297,12 +306,13 @@ output are removed. The in-kernel built-ins read those directly.
 `copy_from_user` and `copy_to_user`. They check that:
 
 - the whole range, computed with overflow checks, lies inside the caller's
-  16 GiB window;
+  1 GiB window;
 - it's aligned for the type;
 - it's mapped in the caller's own page table, with read permission (in) or
   write permission (out).
 
-Only then does the copy run, through the physical frames, so PAN stays on.
+Only then does the copy run, through the physical frames, so PAN (where
+present) stays on.
 The kernel runs on one CPU and a task's mappings don't change during its own syscall,
 so a passed check can't turn into a faulting copy.
 
@@ -353,15 +363,14 @@ tests; the median counts only successful round trips.
 system policy lives:
 
 ```rust
-Service { name: "pong",  binary: "PONG.ELF",
-          grants: &[recv(PING), send(PONG)],
-          start: Autostart, supervise: None, optional: false },
-Service { name: "pulse", binary: "PULSE.ELF",
-          grants: &[],
-          start: Autostart, supervise: Restart { after_ms: 250 }, optional: false },
-Service { name: "probe-bad", binary: "PROBEBAD.ELF",
-          grants: &[], start: Autostart, supervise: None, optional: true },
+Service { grants: &[(PING, RECV), (PONG, SEND)], ..service("pong", "PONG.ELF") },
+Service { restart_after_ms: Some(250), ..service("pulse", "PULSE.ELF") },
+Service { arg: 0, optional: true, ..service("probe-bad-code", "PROBEBAD.ELF") },
 ```
+
+Each entry has a name, a binary, its grants (channel index and rights), an
+argument passed to `main`, an optional restart delay, and whether it is
+optional. Every entry is started at boot.
 
 At startup `init`:
 

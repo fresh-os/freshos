@@ -1,8 +1,8 @@
 # FreshOS: Where We Are
 
-*April 2026 — last updated 25 September 2026*
+*April 2026 — last updated 26 September 2026*
 
-## Current status — 25 September 2026
+## Current status — 26 September 2026
 
 **Direction.** A daily driver is the long-term destination (decision 0002), with
 **responsiveness and observability as twin goals**. The **Raspberry Pi 4** is the
@@ -11,18 +11,40 @@ reference hardware and x86_64 is gone (0003; its lessons are in
 via `no_std` + `alloc` cores (0004). The order of work is the v1 ladder in
 `docs/FreshOS-v1-Scope.md`.
 
+**Done: EL0 isolation on QEMU — 26 September 2026**
+(`docs/plans/2026-09-26-el0-isolation-design.md`). Services run at EL0, each in
+its own address space, with W^X pages, a kernel that never dereferences a user
+pointer, and PAN where the CPU has it. They talk only through channel handles
+that `init` grants, one receiving process per channel. The kernel starts only
+`init`, which starts and supervises everything else; the kernel's registry
+records every spawn and exit, and the MCP bridge and flow view read it. Direct
+hand-off took the steady-state ping/pong median round trip from about 10.8 ms
+to 10–28 µs (four runs), under the spec's 100 µs target. 27 automated tests cover it
+(`./test.sh`); `AGENTS.md` describes the model.
+
+**▶ Next:** move the in-kernel built-ins out to EL0, one spec each: the keyboard
+driver, dashboard, MCP bridge, shell and compositor. Each spec deletes its
+`builtin:` entry in `init`'s table.
+
+**Known gaps to verify or close:**
+
+- Verify on a real Pi 4: the no-PAN path, I-cache maintenance and the GICv2 board path.
+- On a real PL011 at 115200 baud, a 256-byte LOG busy-writes for about 23 ms with IRQs masked; it needs a log ring.
+- Kernel stacks have no guard pages; the canary only detects an overrun.
+- The keyboard channel holds 16 events, so a burst of keys loses some.
+- Serial lines from different tasks can interleave.
+- `probe-bad-kernel` hardcodes QEMU's RAM base, `0x4000_0000`.
+
 **Shipped:** the live message-flow diagram (OBS.1) on QEMU. The dashboard renders
 tasks as nodes and recent messages as arcs with a pulse that travels sender →
-receiver. Nodes are labelled from a kernel-owned task-name registry
-(`kernel/src/task_names.rs`, named at the service-spawn dispatch in
-`init_abi.rs`), and destinations are attributed via channel consumers
+receiver. Nodes are labelled from the kernel's task registry
+(`kernel/src/registry.rs`), and destinations are attributed via channel consumers
 (`kernel/src/ipc.rs`) even when delivery was buffered. On QEMU the desktop is
 composited to **ramfb**, because the virtio-GPU scanout is invisible under
 `-display cocoa`.
 
-**Working QEMU-first — 25 September 2026.** There is no Pi 4 on hand yet (the
-boards available are a Pi 5, a Pi 2B and a Pi 1), so work that doesn't need the
-board comes first.
+**Working QEMU-first.** There is no Pi 4 on hand yet (the boards available are a
+Pi 5, a Pi 2B and a Pi 1), so work that doesn't need the board comes first.
 
 **Done:** the board layer (`kernel/src/arch/aarch64/board/`). QEMU `virt` and the
 Pi 4 now differ only in one file of addresses each, selected by a cargo feature.
@@ -40,20 +62,16 @@ after "Scheduler started". `gic.rs` now drives GICv3 on QEMU and GICv2 on the
 Pi 4.
 
 **Found:** `tlbi` works under QEMU 11 with HVF (on older QEMU it hung the guest,
-which is why tasks run at EL1 on the Mac). A remap test showed stale
-translations persist until `tlbi`, so page-permission edits now end with a TLB
-invalidation. The two other old HVF limits don't block it
+which is why tasks used to run at EL1 on the Mac). A remap test showed stale
+translations persist until `tlbi`, which is why an exiting task's ASID is
+flushed before its slot is reused. The two other old HVF limits don't block it
 either. A permission fault on a 2 MiB block now reaches the guest as a normal
 data abort (it used to crash QEMU with an `isv` assertion). `msr SP_EL1` at EL1
 is undefined by the architecture on any hardware, so the kernel sets its own
-stack with `mov sp` and user stacks with `msr SP_EL0`, which works. **Per-task
-EL0 isolation can be built on QEMU, without waiting for a Pi 4.**
+stack with `mov sp` and user stacks with `msr SP_EL0`, which works. That is what made
+EL0 isolation possible on QEMU without waiting for a Pi 4.
 
-**Worth a look:** with everything running, the metrics show a frame taking about
-13 ms and an IPC round trip about 14.5 ms, against the manifesto's sub-1 µs IPC
-contract. Measure on real hardware before reading much into QEMU numbers.
-
-**▶ Then, on a real Pi 4 (rung 1):**
+**Then, on a real Pi 4 (rung 1):**
 
 1. Build the kernel for the Pi:
    `rustup run nightly cargo build --package freshos-kernel --target aarch64-unknown-uefi --no-default-features --features board-rpi4`.
