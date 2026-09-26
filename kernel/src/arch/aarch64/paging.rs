@@ -69,6 +69,14 @@ pub unsafe fn init() -> u64 {
         serial_println!("[paging] PAN unavailable (ARMv8.0); user-copy discipline only");
     }
 
+    // TPIDRRO_EL0 is readable at EL0 and holds whatever the firmware left.
+    // Nothing in FreshOS uses it, and EL0 can't write it, so one write here
+    // keeps it zero for every task; it is not part of the saved frame.
+    // (TPIDR_EL0, which EL0 can write, is saved per task in exception.s.)
+    unsafe {
+        core::arch::asm!("msr TPIDRRO_EL0, xzr", options(nomem, nostack));
+    }
+
     // TCR_EL1.A1 = 0: the ASID comes from TTBR0, where each task's lives.
     let tcr = tcr & !(1 << 22);
     unsafe {

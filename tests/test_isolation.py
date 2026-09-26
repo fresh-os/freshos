@@ -32,6 +32,15 @@ class IsolationTest(FreshOSTestCase):
         self.boot.wait_for_log(r"^\[probe-abi\] fp=", timeout=20)
         self.assertTrue(self.boot.find_logs(r"^\[probe-abi\] fp=intact$"))
 
+    def test_tpidr_el0_is_per_task(self) -> None:
+        # probe-abi and probe-tpidr run at once, each writing its own value.
+        for probe in ("probe-abi", "probe-tpidr"):
+            with self.subTest(probe=probe):
+                self.boot.wait_for_log(rf"^\[{probe}\] tpidr=", timeout=20)
+                # A new task starts with 0, not a value left by another.
+                self.assertTrue(self.boot.find_logs(rf"^\[{probe}\] tpidr start=0x0$"))
+                self.assertTrue(self.boot.find_logs(rf"^\[{probe}\] tpidr=intact$"))
+
     def test_syscall_boundary_rejects_bad_input_without_faulting(self) -> None:
         self.boot.wait_for_log(r"^\[probe-abi\] done$", timeout=20)
         expected = (

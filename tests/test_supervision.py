@@ -141,7 +141,7 @@ class SupervisionTest(FreshOSTestCase):
             with self.subTest(task=name):
                 peak = tasks[name]["stack_peak_bytes"]
                 self.assertIsNotNone(peak)
-                self.assertGreater(peak, 800)  # at least one saved frame
+                self.assertGreater(peak, 816)  # at least one saved frame
                 self.assertLess(peak, 32 * 1024)
 
 

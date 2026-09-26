@@ -54,6 +54,7 @@ const TABLE: &[Service] = &[
     Service { arg: 0, optional: true, ..service("probe-bad-code", "PROBEBAD.ELF") },
     Service { arg: 1, optional: true, ..service("probe-bad-stack", "PROBEBAD.ELF") },
     Service { arg: 2, optional: true, ..service("probe-abi", "PROBEBAD.ELF") },
+    Service { arg: 3, optional: true, ..service("probe-tpidr", "PROBEBAD.ELF") },
     Service { grants: &[(SINK, SEND), (PROBE, RECV)], optional: true, ..service("probe-chan", "PROBECHA.ELF") },
     Service { grants: &[(PING, RECV)], optional: true, ..service("probe-dup-recv", "PROBECHA.ELF") },
     Service { optional: true, ..service("probe-badelf", "BADELF.ELF") },

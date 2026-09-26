@@ -2,17 +2,23 @@
 #![no_main]
 
 use freshos_rt::abi::{MAX_LOG, USER_BASE, USER_SIZE, USER_STACK_SIZE, sys};
-use freshos_rt::{Startup, entry, exit, log};
+use freshos_rt::{Startup, entry, exit, log, time_ns, yield_now};
 
 entry!(main);
 
 /// Test-only. Chosen by its table argument:
 ///   0 = write to its own code, 1 = overflow its stack, 2 = check the syscall
 ///   boundary (log sanitising and capping, bad pointers, unknown syscalls,
-///   FP/SIMD state across switches) and exit cleanly, else = read that address.
+///   TPIDR_EL0 and FP/SIMD state across switches) and exit cleanly,
+///   3 = only the TPIDR_EL0 check, as a second instance writing its own value
+///   at the same time, else = read that address.
 /// The forbidden accesses should never survive.
 fn main(start: Startup) -> ! {
     match start.arg() {
+        3 => {
+            check_tpidr();
+            exit()
+        }
         0 => {
             log!("writing to own code");
             let code = main as *const () as *mut u32;
@@ -59,7 +65,38 @@ fn raw_svc(nr: u64, a0: u64, a1: u64) -> i64 {
     ret
 }
 
+fn read_tpidr() -> u64 {
+    let value: u64;
+    unsafe { core::arch::asm!("mrs {}, TPIDR_EL0", out(reg) value, options(nomem, nostack)) };
+    value
+}
+
+/// TPIDR_EL0 is EL0-writable, so it must be per task: a new task starts with
+/// 0 (not what the firmware or another task left), and a value written here
+/// survives other tasks running. Two instances run this at once (probe-abi
+/// and probe-tpidr), each writing its own value, so a register shared between
+/// tasks shows up as "corrupt". No Rust code in a userbin uses TPIDR_EL0
+/// (there is no thread-local storage), so only the kernel could change it.
+fn check_tpidr() {
+    log!("tpidr start={:#x}", read_tpidr());
+    // Distinct per instance: the two start at different times.
+    let mine = 0x7D1D_0000_0000_0000 | (time_ns() & 0xFFFF_FFFF);
+    unsafe { core::arch::asm!("msr TPIDR_EL0, {}", in(reg) mine, options(nomem, nostack)) };
+    // Long enough for both instances to overlap, and for many ticks.
+    let deadline = time_ns() + 200_000_000;
+    while time_ns() < deadline {
+        yield_now();
+        for _ in 0..10_000 {
+            core::hint::spin_loop();
+        }
+    }
+    let now = read_tpidr();
+    log!("tpidr={}", if now == mine { "intact" } else { "corrupt" });
+}
+
 fn check_abi() -> ! {
+    check_tpidr();
+
     // The kernel must turn these into '?' on one line: newline, ESC.
     log!("sanitise a\nb\x1b[31mc");
 

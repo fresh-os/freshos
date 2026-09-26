@@ -91,16 +91,23 @@ exception_vectors:
 //   272..784   q0..q31          (q_n at 272 + 16*n)
 //   784        FPCR
 //   792        FPSR
-// Total: 800 bytes, a multiple of 16, so SP stays 16-byte aligned.
+//   800        TPIDR_EL0
+//   808        (padding)
+// Total: 816 bytes, a multiple of 16, so SP stays 16-byte aligned.
 //
 // The FP area sits above the GPR area so every GPR offset is unchanged.
 // It is saved eagerly because the kernel itself uses the vector registers
 // (memcpy, memset), and a task switch must not leak or clobber one task's
 // FP/SIMD state into another's.
+//
+// TPIDR_EL0, the EL0 thread pointer, is writable from EL0, so it is per task
+// state like any register: without saving it, one task could read what
+// another (or the firmware) left there. TPIDRRO_EL0 is not saved: EL0 can't
+// write it, and paging::init zeroes it once at boot.
 // ===================================================================
 
 .macro save_all_regs
-    sub     sp, sp, #800
+    sub     sp, sp, #816
     stp     x0,  x1,  [sp, #0]
     stp     x2,  x3,  [sp, #16]
     stp     x4,  x5,  [sp, #32]
@@ -144,9 +151,13 @@ exception_vectors:
     mrs     x11, FPSR
     str     x10, [sp, #784]         // FPCR (beyond stp's reach)
     str     x11, [sp, #792]         // FPSR
+    mrs     x10, TPIDR_EL0
+    str     x10, [sp, #800]         // TPIDR_EL0
 .endm
 
 .macro restore_all_regs
+    ldr     x10, [sp, #800]
+    msr     TPIDR_EL0, x10
     ldr     x10, [sp, #784]
     ldr     x11, [sp, #792]
     msr     FPCR, x10
@@ -190,7 +201,7 @@ exception_vectors:
     ldp     x26, x27, [sp, #208]
     ldp     x28, x29, [sp, #224]
     ldr     x30,      [sp, #240]
-    add     sp, sp, #800
+    add     sp, sp, #816
 .endm
 
 

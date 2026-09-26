@@ -46,10 +46,12 @@ const CANARY_WORDS: usize = 8; // 64 bytes
 const PAINT: u8 = 0xA5;
 
 /// Size of the saved register frame that exception.s's save_all_regs pushes:
-/// the GPRs, SP_EL0, ELR and SPSR at 0..272, then q0-q31, FPCR and FPSR.
+/// the GPRs, SP_EL0, ELR and SPSR at 0..272, then q0-q31, FPCR and FPSR,
+/// then TPIDR_EL0 at 800 and 8 bytes of padding.
 /// A new task's frame is all zeroes apart from the slots set below, so it
-/// starts with zeroed FP/SIMD registers, FPCR = 0 and FPSR = 0.
-const FRAME_SIZE: u64 = 800;
+/// starts with zeroed FP/SIMD registers, FPCR = 0, FPSR = 0 and
+/// TPIDR_EL0 = 0: nothing another task or the firmware left behind.
+const FRAME_SIZE: u64 = 816;
 
 #[derive(Clone, Copy, PartialEq)]
 enum State {
