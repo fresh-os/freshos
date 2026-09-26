@@ -226,9 +226,9 @@ kernel_irq_entry:
 // ===================================================================
 // current_sync_entry: synchronous exception while running at EL1
 //
-// On the ARM/HVF path, scheduled services currently run at EL1. If one of
-// those tasks faults, route to a containment handler instead of panicking the
-// whole kernel immediately.
+// exception_current_sync decides: while an EL0 task is current, a fault at
+// EL1 is a kernel bug and panics; an EL1 built-in's fault terminates only
+// that built-in; on the boot task it halts.
 // ===================================================================
 
 current_sync_entry:

@@ -64,7 +64,7 @@ rustup run nightly cargo clippy --package freshos-kernel
 | `BUILD_ONLY=1` | Build, then exit without staging or booting | boot |
 | `FRESHOS_ACCEL` | `hvf`, or `tcg` for software emulation (`-cpu max`) | `hvf` |
 
-- **Tests:** `tests/` holds Python 3.14 `unittest` suites, standard library only. `tests/harness.py` boots QEMU through `run-arm.sh` once per test class, captures the serial log, and talks to the MCP bridge. Assert on MCP views and log lines, always with a timeout. `tests/test_abi.py` runs `freshos-abi`'s Rust unit tests on the host. Every change lands with its tests, and a test must fail when its claim is false: never let one pass without checking anything.
+- **Tests:** `tests/` holds Python 3.14 `unittest` suites, standard library only. `tests/harness.py` boots QEMU through `run-arm.sh` once per test class, captures the serial log, and talks to the MCP bridge. Assert on MCP views and log lines, always with a timeout. `tests/test_abi.py` runs `freshos-abi`'s Rust unit tests on the host. Every change lands with its tests, and a test must fail when its claim is false: never let one pass without checking anything. Every test also fails if its boot's log shows `KERNEL PANIC`, `*** TASK FAULT ***` or `*** EXCEPTION ***` (`FreshOSTestCase.tearDown`); the expected EL0 faults print `*** EL0 TASK FAULT ***` and don't count.
 - **Warnings:** the tree is not warning-clean under `build` or `clippy`. Don't add new warnings. Clean up existing ones only when that is your task.
 - **Firmware:** comes from `brew install qemu` (`/opt/homebrew/share/qemu/edk2-*`). QEMU loads it through pflash, not `-bios`. `run-arm.sh` copies a writable `edk2-arm-vars.fd` into the repo on first run.
 
@@ -91,7 +91,7 @@ The design is in `docs/plans/2026-09-26-el0-isolation-design.md`. This section i
 - **The kernel never dereferences a user virtual address.** `copy_from_user`/`copy_to_user` (`addrspace.rs`) check the whole range against the task's own table, then copy through the kernel's map of the physical frame.
 - **PAN** is detected at boot and turned on where the CPU has it (it does under QEMU with HVF). **The Pi 4's Cortex-A72 (ARMv8.0) has no PAN**; there the copy discipline is the only enforcement.
 - **I-cache maintenance** (`paging::sync_icache`) runs after the loader writes code. Apple cores don't need it; the Pi 4 does.
-- A fault at EL0 terminates only that task, with reason `fault`.
+- A fault at EL0 terminates only that task, with reason `fault`, under the banner `*** EL0 TASK FAULT ***`. A fault at EL1 while an EL0 task is current happened in the kernel (a syscall or an IRQ on that task's behalf), so it panics with ESR, FAR, ELR and the task's id and name, and says when it is a PAN violation. An EL1 built-in's own fault still terminates only that built-in (`*** TASK FAULT ***`).
 
 ### Tasks and scheduling (`arch/aarch64/context.rs`)
 

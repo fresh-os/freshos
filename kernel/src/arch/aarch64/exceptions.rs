@@ -88,11 +88,44 @@ extern "C" fn exception_current_sync(esr: u64, elr: u64, far: u64) -> ! {
         }
     }
 
+    // An EL0 task's own faults arrive at exception_lower_sync. A fault taken
+    // at EL1 while an EL0 task is current happened in the kernel, working on
+    // that task's behalf (a syscall, or an IRQ): a kernel bug, never the
+    // task's fault, so it must not be hidden as one.
+    if super::context::current_space().is_some() {
+        panic!(
+            "kernel fault{} while task {} ({}) was current: ESR={:#x} FAR={:#x} ELR={:#x}",
+            if is_pan_violation(esr, far) {
+                " (PAN violation: the kernel touched user memory)"
+            } else {
+                ""
+            },
+            task_id,
+            crate::registry::name(task_id).as_str(),
+            esr,
+            far,
+            elr,
+        );
+    }
+
+    // An EL1 built-in faulted: contain it like an EL0 task.
     serial_println!("*** TASK FAULT ***");
     serial_println!("  Task: {}", task_id);
     log_exception(esr, elr, far);
     serial_println!("  Action: terminate faulting task");
     super::context::terminate_current(freshos_abi::ExitReason::Fault)
+}
+
+/// A same-EL data abort (EC 0x25) that is a permission fault (DFSC 0b0011xx)
+/// on the user window, with PAN on: the kernel dereferenced a user address
+/// instead of going through copy_from_user/copy_to_user.
+fn is_pan_violation(esr: u64, far: u64) -> bool {
+    let ec = (esr >> 26) & 0x3F;
+    let dfsc = esr & 0x3F;
+    ec == 0x25
+        && dfsc & 0x3C == 0x0C
+        && super::paging::pan_enabled()
+        && super::addrspace::in_window(far, 1)
 }
 
 #[unsafe(no_mangle)]

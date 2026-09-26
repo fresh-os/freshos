@@ -9,6 +9,13 @@ use crate::serial::serial_println;
 const ADDR_MASK: u64 = 0x0000_FFFF_FFFF_F000;
 
 static mut TTBR0_ROOT: u64 = 0;
+/// Whether `init` turned PAN on (the CPU has FEAT_PAN).
+static PAN_ON: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Whether PAN is on: an EL1 access to EL0 memory then faults.
+pub fn pan_enabled() -> bool {
+    PAN_ON.load(core::sync::atomic::Ordering::SeqCst)
+}
 
 /// Turn WXN off and PAN on (where the CPU has it), clear TCR.A1, and hand the firmware's table to
 /// `addrspace`.
@@ -65,6 +72,7 @@ pub unsafe fn init() -> u64 {
             core::arch::asm!(".inst 0xd500419f", options(nomem, nostack));
             core::arch::asm!("isb", options(nomem, nostack));
         }
+        PAN_ON.store(true, core::sync::atomic::Ordering::SeqCst);
     } else {
         serial_println!("[paging] PAN unavailable (ARMv8.0); user-copy discipline only");
     }

@@ -40,6 +40,12 @@ TEST_ELFS: tuple[str, ...] = ("probe-bad", "probe-chan")
 
 ANSI = re.compile(r"\x1b\[[0-9;?=]*[A-Za-z]|\x1b[()][A-Za-z0-9]")
 
+# Lines that mean the kernel itself went wrong: a panic, an EL1 built-in's
+# fault, or an exception on the boot task (exceptions.rs). An EL0 task's
+# fault prints "*** EL0 TASK FAULT ***", which is expected of the probes and
+# doesn't match.
+KERNEL_FAULT = r"KERNEL PANIC|\*\*\* TASK FAULT \*\*\*|\*\*\* EXCEPTION \*\*\*"
+
 _built = False
 
 
@@ -254,6 +260,13 @@ class FreshOSTestCase(unittest.TestCase):
     @classmethod
     def tearDownClass(cls) -> None:
         cls.boot.stop()
+
+    def tearDown(self) -> None:
+        # Every test fails if the kernel panicked or faulted at EL1 during
+        # the boot so far, whatever the test itself checked.
+        if faults := self.boot.find_logs(KERNEL_FAULT):
+            lines = [m.string for m in faults]
+            self.fail(f"the kernel faulted during this boot: {lines}")
 
     def services(self) -> dict[str, dict[str, Any]]:
         return {service["name"]: service for service in self.boot.mcp().view("services")}
