@@ -19,7 +19,7 @@ that `init` grants, one receiving process per channel. The kernel starts only
 `init`, which starts and supervises everything else; the kernel's registry
 records every spawn and exit, and the MCP bridge and flow view read it. Direct
 hand-off took the steady-state ping/pong median round trip from about 10.8 ms
-to 10–28 µs (four runs), under the spec's 100 µs target. 27 automated tests cover it
+to 10–28 µs (four runs), under the spec's 100 µs target. 31 automated tests cover it
 (`./test.sh`); `AGENTS.md` describes the model.
 
 **▶ Next:** move the in-kernel built-ins out to EL0, one spec each: the keyboard
@@ -34,6 +34,8 @@ driver, dashboard, MCP bridge, shell and compositor. Each spec deletes its
 - The keyboard channel holds 16 events, so a burst of keys loses some.
 - Serial lines from different tasks can interleave.
 - `probe-bad-kernel` hardcodes QEMU's RAM base, `0x4000_0000`.
+- Untested: `init`'s own death (the kernel's halt), the exit-notice backlog when `init`'s inbox is full, a `recv` deadline timing out, and the path without PAN.
+- After a receiver exits and its `RECV` right can't go home, the trace still attributes the channel's messages to its last consumer, which has exited (its slot may already hold another task).
 
 **Shipped:** the live message-flow diagram (OBS.1) on QEMU. The dashboard renders
 tasks as nodes and recent messages as arcs with a pulse that travels sender →
@@ -84,6 +86,11 @@ EL0 isolation possible on QEMU without waiting for a Pi 4.
    prints to serial itself, which proves the wiring before FreshOS runs.
 4. Boot FreshOS and note where it stops. The first log lines should read
    `Board: Raspberry Pi 4`.
+5. Check the boot hardening on the hardware: the `EL0 controls:` line shows
+   what the firmware left in `CNTKCTL_EL1` and in `SCTLR_EL1`'s UMA, DZE,
+   UCT and UCI bits before the kernel zeroed them; the boot-time
+   `tlbi vmalle1is` must not hang; and `probe-counter` (staged by the tests)
+   must still end with a fault.
 
 **Parked:** #63 (a `virtio-input` keyboard driver). It only helps QEMU, and rung 1
 is the Pi. On the Pi, input will come from USB. #65 (the stats overlay flickers
