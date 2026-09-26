@@ -395,10 +395,11 @@ fn main() -> Status {
     serial_println!("  {} IPC channels", ipc::channel_count());
 
     // ---- Scheduler: spawn tasks ----
-    // HVF limitation: all tlbi instructions are trapped, making EL0 page
-    // table management impossible (can't grant user access without TLB
-    // invalidation). Run tasks at EL1 with direct syscall dispatch instead.
-    // The SVC path and EL0 infrastructure is ready for bare-metal targets.
+    // Tasks run at EL1 with direct syscall dispatch, sharing one page table.
+    // That began as an HVF limitation: older QEMU hung on every tlbi, so page
+    // tables couldn't be managed safely. QEMU 11 runs tlbi correctly, so
+    // per-task EL0 isolation is now the goal here too (v1 rung 1). The SVC
+    // path and EL0 infrastructure already exist.
     arch::context::init(ttbr0);
 
     let loaded_init = init_file.as_ref().and_then(|file| {

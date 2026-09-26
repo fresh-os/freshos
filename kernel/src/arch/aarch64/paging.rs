@@ -1,8 +1,11 @@
 /// aarch64 page tables — patch UEFI's tables for EL0 access.
 ///
-/// We modify UEFI's existing L3 page entries in-place using the ARM
-/// break-before-make sequence to avoid TLB corruption. Only pages that
-/// EL0 tasks need (user stacks, code, framebuffer, surfaces) are patched.
+/// We modify UEFI's existing L3 page entries in-place. Only pages that EL0
+/// tasks need (user stacks, code, framebuffer, surfaces) are patched, and
+/// only their permission bits (AP, XN) change. The architecture doesn't
+/// require break-before-make for permission-only changes, but the TLB may
+/// still hold the old permissions, so every batch of edits ends with a TLB
+/// invalidation (`flush_tlb`).
 ///
 /// Since EL1 (kernel) also needs to access these pages, we disable both
 /// PAN and WXN in SCTLR_EL1.
@@ -68,9 +71,9 @@ pub unsafe fn init() -> u64 {
 /// Grant EL0 access to a range of physical addresses by patching the
 /// UEFI page table entries in-place.
 ///
-/// Uses break-before-make: invalidate entry → TLB invalidate → write new entry.
-/// This is safe as long as no EL0 task is running during the patch (call
-/// before starting the scheduler).
+/// Only the permission bits change, so the entries are rewritten in place and
+/// the TLB is invalidated afterwards. Call before the affected pages are in
+/// use by an EL0 task.
 pub fn grant_user_access(start: u64, size: u64) {
     if size == 0 {
         return;
@@ -90,11 +93,7 @@ pub fn grant_user_access(start: u64, size: u64) {
         addr += 4096;
     }
 
-    // DSB to ensure all writes are visible, then ISB
-    unsafe {
-        core::arch::asm!("dsb ish", options(nomem, nostack));
-        core::arch::asm!("isb", options(nomem, nostack));
-    }
+    flush_tlb();
 
     // Debug output removed — serial at 115200 baud is the bottleneck.
     let _ = patched;
@@ -115,8 +114,8 @@ pub fn make_executable(start: u64, size: u64) {
         addr += 4096;
     }
 
+    flush_tlb();
     unsafe {
-        core::arch::asm!("dsb ish", options(nomem, nostack));
         core::arch::asm!("ic iallu", options(nomem, nostack));
         core::arch::asm!("dsb ish", options(nomem, nostack));
         core::arch::asm!("isb", options(nomem, nostack));
@@ -138,11 +137,9 @@ pub fn switch_ttbr0(_: u64) {}
 
 /// Walk the page table for `va` and set AP=AP_RW_ALL on the leaf entry.
 ///
-/// Direct write without break-before-make: QEMU HVF traps all `tlbi`
-/// instructions, making the standard sequence unusable. Under HVF's
-/// software-managed TLB this is safe — the hypervisor picks up changes
-/// on the next TLB miss. On real hardware, proper break-before-make
-/// would be needed.
+/// Writes the entry in place: permission-only changes don't need
+/// break-before-make. The caller must invalidate the TLB afterwards
+/// (`flush_tlb`); stale translations do persist, including under HVF.
 ///
 /// Returns true if the entry was modified.
 fn patch_leaf_entry(table: u64, level: u32, va: u64) -> bool {
@@ -209,6 +206,18 @@ fn clear_xn_leaf_entry(table: u64, level: u32, va: u64) -> bool {
 
     write_entry(table, index, new_entry);
     true
+}
+
+/// Make page-table edits visible: order the writes before the invalidation,
+/// drop every EL1&0 translation, then wait for it to complete.
+///
+/// Older QEMU hung the guest on any `tlbi` under HVF; QEMU 11 runs it and it
+/// invalidates correctly (verified 2026-09-25: a remapped page kept its stale
+/// translation until `tlbi`).
+fn flush_tlb() {
+    unsafe {
+        core::arch::asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb", options(nostack));
+    }
 }
 
 fn read_entry(table_phys: u64, index: usize) -> u64 {
