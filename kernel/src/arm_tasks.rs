@@ -9,6 +9,7 @@
 use crate::font_aa;
 use crate::framebuffer::{Color, Framebuffer};
 use crate::ipc;
+use crate::metrics::MetricSample;
 
 // ============================================================================
 // Colours
@@ -46,8 +47,6 @@ const PANEL_BG: Color = Color::new(0x08, 0x0C, 0x14);
 // IPC channels (must match main.rs setup)
 const CH_KBD_EVENTS: u32 = 0;
 const CH_SHELL_KEYS: u32 = 1;
-const CH_IPC_PROBE_PING: u32 = 2;
-const CH_IPC_PROBE_PONG: u32 = 3;
 
 // ============================================================================
 // EL1 helpers — direct kernel calls
@@ -691,7 +690,7 @@ fn draw_stats_overlay(
     draw_metric_value(fb, lx + 80, y, metrics.present_us.latest, PANEL_BG);
     y += 16;
 
-    draw_metric_value(fb, lx + 80, y, metrics.ipc_rtt_us.latest, PANEL_BG);
+    draw_metric_value(fb, lx + 80, y, metrics.ipc_delivery_ns.latest / 1000, PANEL_BG);
     y += 16;
 
     draw_metric_value(fb, lx + 80, y, metrics.sched_wake_us.latest, PANEL_BG);
@@ -1234,14 +1233,14 @@ pub fn compositor_el1() -> ! {
         if frame_counter % 240 == 0 {
             let metrics = crate::metrics::snapshot();
             crate::serial::serial_println!(
-                "[metrics] frame={}us bg={}us win={}us ui={}us present={}us photon={}us ipc_rtt={}us wake={}us",
+                "[metrics] frame={}us bg={}us win={}us ui={}us present={}us photon={}us ipc={}ns wake={}us",
                 metrics.frame_us.latest,
                 metrics.background_us.latest,
                 metrics.windows_us.latest,
                 metrics.chrome_us.latest,
                 metrics.present_us.latest,
                 metrics.input_to_photon_us.latest,
-                metrics.ipc_rtt_us.latest,
+                metrics.ipc_delivery_ns.latest,
                 metrics.sched_wake_us.latest
             );
         }
@@ -1928,14 +1927,14 @@ pub fn dashboard_el1() -> ! {
         if ns.saturating_sub(last_metrics_log_ns) >= 1_000_000_000 {
             last_metrics_log_ns = ns;
             crate::serial::serial_println!(
-                "[metrics] frame={}us bg={}us win={}us ui={}us present={}us photon={}us ipc_rtt={}us wake={}us",
+                "[metrics] frame={}us bg={}us win={}us ui={}us present={}us photon={}us ipc={}ns wake={}us",
                 metrics.frame_us.latest,
                 metrics.background_us.latest,
                 metrics.windows_us.latest,
                 metrics.chrome_us.latest,
                 metrics.present_us.latest,
                 metrics.input_to_photon_us.latest,
-                metrics.ipc_rtt_us.latest,
+                metrics.ipc_delivery_ns.latest,
                 metrics.sched_wake_us.latest
             );
         }
@@ -1993,7 +1992,7 @@ pub fn dashboard_el1() -> ! {
             DASH_BG,
         );
         y += 18;
-        draw_metric_pair_line(&mut surf, 14, y, "IPC RTT", metrics.ipc_rtt_us, DASH_BG);
+        draw_metric_pair_line(&mut surf, 14, y, "IPC deliv", MetricSample { latest: metrics.ipc_delivery_ns.latest / 1000, max: metrics.ipc_delivery_ns.max / 1000 }, DASH_BG);
         y += 18;
         draw_metric_pair_line(&mut surf, 14, y, "Wake", metrics.sched_wake_us, DASH_BG);
         y += 18;
@@ -2167,55 +2166,6 @@ pub fn dashboard_el1() -> ! {
         );
         crate::metrics::mark_surface_damage(1, 0, 0, SURF_W as u32, SURF_H as u32);
         yield_now();
-    }
-}
-
-// ============================================================================
-// IPC probe — ping/pong round-trip benchmark over real channels
-// ============================================================================
-
-pub fn ipc_probe_ping_el1() -> ! {
-    crate::serial::serial_println!("[probe] ping");
-    let mut sample_count: u64 = 0;
-
-    loop {
-        let start_ns = time_ns();
-        let mut msg = ipc::Message::new(ipc::MSG_PING);
-        msg.payload[0] = start_ns;
-        msg.len = 8;
-        let _ = ipc::send(CH_IPC_PROBE_PING, &msg);
-
-        if let Ok(reply) = ipc::recv(CH_IPC_PROBE_PONG) {
-            if reply.tag == ipc::MSG_PONG {
-                let sent_ns = reply.payload[0];
-                let now_ns = time_ns();
-                if sent_ns > 0 && now_ns > sent_ns {
-                    let rtt_us = (now_ns - sent_ns) / 1000;
-                    crate::metrics::record_ipc_rtt_us(rtt_us);
-                    sample_count += 1;
-                    if sample_count % 64 == 0 {
-                        crate::serial::serial_println!("[ipc] rtt={}us", rtt_us);
-                    }
-                }
-            }
-        }
-
-        for _ in 0..25 {
-            yield_now();
-        }
-    }
-}
-
-pub fn ipc_probe_pong_el1() -> ! {
-    crate::serial::serial_println!("[probe] pong");
-
-    loop {
-        if let Ok(msg) = ipc::recv(CH_IPC_PROBE_PING) {
-            let mut reply = ipc::Message::new(ipc::MSG_PONG);
-            reply.payload[0] = msg.payload[0];
-            reply.len = 8;
-            let _ = ipc::send(CH_IPC_PROBE_PONG, &reply);
-        }
     }
 }
 

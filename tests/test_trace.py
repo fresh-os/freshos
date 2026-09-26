@@ -9,5 +9,4 @@ class TraceTest(FreshOSTestCase):
         self.wait_until(lambda: bool(pings()), timeout=20, message="a PING in the trace")
         for message in pings():
             self.assertEqual(message["from"]["name"], "ping")
-            if message["to"] is not None:
-                self.assertEqual(message["to"]["name"], "pong")
+            self.assertEqual(message["to"]["name"], "pong")

@@ -124,11 +124,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "freshos-ping"
+version = "0.1.0"
+dependencies = [
+ "freshos-rt",
+]
+
+[[package]]
 name = "freshos-pong"
 version = "0.1.0"
+dependencies = [
+ "freshos-rt",
+]
 
 [[package]]
 name = "freshos-probe-bad"
+version = "0.1.0"
+dependencies = [
+ "freshos-rt",
+]
+
+[[package]]
+name = "freshos-probe-chan"
 version = "0.1.0"
 dependencies = [
  "freshos-rt",

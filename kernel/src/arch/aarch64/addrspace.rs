@@ -226,8 +226,6 @@ pub fn copy_from_user(space: &AddressSpace, va: u64, out: &mut [u8]) -> Result<(
     Ok(())
 }
 
-// The syscall layer (EL0 isolation plan, Task 5) is the first caller.
-#[allow(dead_code)]
 pub fn copy_to_user(space: &AddressSpace, va: u64, data: &[u8]) -> Result<(), Error> {
     check_range(space, va, data.len() as u64, true)?;
     let mut done = 0;
@@ -244,8 +242,6 @@ pub fn copy_to_user(space: &AddressSpace, va: u64, data: &[u8]) -> Result<(), Er
 }
 
 /// Read a `T` from user memory. The address must be aligned for `T`.
-// The syscall layer (EL0 isolation plan, Task 5) is the first caller.
-#[allow(dead_code)]
 pub fn read_user<T: Copy>(space: &AddressSpace, va: u64) -> Result<T, Error> {
     if !va.is_multiple_of(core::mem::align_of::<T>() as u64) {
         return Err(Error::BadPointer);
@@ -259,8 +255,6 @@ pub fn read_user<T: Copy>(space: &AddressSpace, va: u64) -> Result<T, Error> {
 }
 
 /// Write a `T` to user memory. The address must be aligned for `T`.
-// The syscall layer (EL0 isolation plan, Task 5) is the first caller.
-#[allow(dead_code)]
 pub fn write_user<T: Copy>(space: &AddressSpace, va: u64, value: &T) -> Result<(), Error> {
     if !va.is_multiple_of(core::mem::align_of::<T>() as u64) {
         return Err(Error::BadPointer);
@@ -272,8 +266,6 @@ pub fn write_user<T: Copy>(space: &AddressSpace, va: u64, value: &T) -> Result<(
 }
 
 /// Check that a `T` at `va` could be written, without writing it.
-// The syscall layer (EL0 isolation plan, Task 5) is the first caller.
-#[allow(dead_code)]
 pub fn check_writable<T>(space: &AddressSpace, va: u64) -> Result<(), Error> {
     if !va.is_multiple_of(core::mem::align_of::<T>() as u64) {
         return Err(Error::BadPointer);

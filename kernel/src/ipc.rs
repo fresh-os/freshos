@@ -37,24 +37,33 @@ const MAX_CHANNELS: usize = 32;
 const CHANNEL_CAP: usize = 16;
 
 #[derive(Clone, Copy)]
+struct Queued {
+    msg: Message,
+    sent_ns: u64,
+}
+const EMPTY_QUEUED: Queued = Queued { msg: Message::empty(), sent_ns: 0 };
+
+#[derive(Clone, Copy)]
 struct Channel {
     active: bool,
-    buf: [Message; CHANNEL_CAP],
+    buf: [Queued; CHANNEL_CAP],
     head: usize,
     tail: usize,
     count: usize,
     waiter: Option<usize>, // task blocked on recv
     consumer: u16,         // last task to recv on this channel (0xFFFF = none yet)
+    receiver: u16,         // task holding RECV on this channel (0xFFFF = none)
 }
 
 const EMPTY_CHANNEL: Channel = Channel {
     active: false,
-    buf: [Message::empty(); CHANNEL_CAP],
+    buf: [EMPTY_QUEUED; CHANNEL_CAP],
     head: 0,
     tail: 0,
     count: 0,
     waiter: None,
     consumer: 0xFFFF,
+    receiver: 0xFFFF,
 };
 
 struct ChannelsCell(UnsafeCell<[Channel; MAX_CHANNELS]>);
@@ -96,8 +105,15 @@ pub fn create() -> Result<u32, Error> {
 
 /// Send a message on a channel. Non-blocking.
 ///
-/// If a task is blocked waiting to receive on this channel, it is woken.
-pub fn send(channel_id: u32, msg: &Message) -> Result<(), Error> {
+/// If a task is blocked waiting to receive on this channel, it is woken. For
+/// an EL0 task waiting in the recv syscall, the message is delivered straight
+/// into its buffer and `Some(task)` is returned: that task is ready, and the
+/// caller may run it next.
+pub fn send(channel_id: u32, msg: &Message) -> Result<Option<usize>, Error> {
+    // Built-ins send with IRQs enabled. Delivery must not interleave with a
+    // tick's deadline expiry, or a message could be dequeued for a wait that
+    // has just timed out, and lost.
+    let _irq = crate::arch::IrqGuard::mask();
     let id = channel_id as usize;
     if id >= MAX_CHANNELS {
         return Err(Error::InvalidChannel);
@@ -116,6 +132,7 @@ pub fn send(channel_id: u32, msg: &Message) -> Result<(), Error> {
     // buffered rather than handed to a blocked waiter.
     let receiver = match ch.waiter {
         Some(w) => w,
+        None if ch.receiver != 0xFFFF => ch.receiver as usize,
         None if ch.consumer != 0xFFFF => ch.consumer as usize,
         None => 0xFFFF,
     };
@@ -124,7 +141,7 @@ pub fn send(channel_id: u32, msg: &Message) -> Result<(), Error> {
     // The kernel decides who sent a message, never the sender (spec §4).
     let mut stamped = *msg;
     stamped.sender = crate::arch::current_task() as u16;
-    ch.buf[ch.head] = stamped;
+    ch.buf[ch.head] = Queued { msg: stamped, sent_ns: now_ns };
     ch.head = (ch.head + 1) % CHANNEL_CAP;
     ch.count += 1;
 
@@ -137,13 +154,33 @@ pub fn send(channel_id: u32, msg: &Message) -> Result<(), Error> {
         tag: msg.tag as u16,
     });
 
-    // Wake the blocked receiver
+    // Wake the waiting receiver. A user task waiting in recv gets the message
+    // delivered straight into its buffer and is ready to run; the caller may
+    // hand the CPU to it.
     if let Some(task_id) = ch.waiter.take() {
         crate::metrics::note_task_unblocked(task_id, now_ns);
+        if crate::arch::context::has_user_wait(task_id)
+            && let Some(message) = dequeue(ch)
+        {
+            crate::arch::context::complete_user_recv(task_id, &message);
+            return Ok(Some(task_id));
+        }
         crate::arch::unblock_task(task_id);
     }
+    Ok(None)
+}
 
-    Ok(())
+/// Take the oldest message, recording how long it waited to be delivered.
+fn dequeue(ch: &mut Channel) -> Option<Message> {
+    if ch.count == 0 {
+        return None;
+    }
+    let queued = ch.buf[ch.tail];
+    ch.tail = (ch.tail + 1) % CHANNEL_CAP;
+    ch.count -= 1;
+    let now = crate::arch::time_ns();
+    crate::metrics::record_ipc_delivery_ns(now.saturating_sub(queued.sent_ns));
+    Some(queued.msg)
 }
 
 /// Receive a message from a channel. Blocks if the channel is empty.
@@ -170,10 +207,7 @@ pub fn recv(channel_id: u32) -> Result<Message, Error> {
         // destination even when no task is blocked waiting.
         ch.consumer = crate::arch::current_task() as u16;
 
-        if ch.count > 0 {
-            let msg = ch.buf[ch.tail];
-            ch.tail = (ch.tail + 1) % CHANNEL_CAP;
-            ch.count -= 1;
+        if let Some(msg) = dequeue(ch) {
             crate::arch::interrupt_enable();
             return Ok(msg);
         }
@@ -199,13 +233,45 @@ pub fn try_recv(channel_id: u32) -> Option<Message> {
         return None;
     }
     ch.consumer = crate::arch::current_task() as u16;
-    if ch.count == 0 {
-        return None;
+    dequeue(ch)
+}
+
+/// Take a message without blocking (for syscalls).
+pub fn try_dequeue(channel_id: u32) -> Result<Option<Message>, Error> {
+    let ch = channel_mut(channel_id)?;
+    ch.consumer = crate::arch::current_task() as u16;
+    Ok(dequeue(ch))
+}
+
+/// Record `task` as waiting on `channel_id` (it must hold the channel's RECV).
+pub fn register_waiter(channel_id: u32, task: usize) -> Result<(), Error> {
+    channel_mut(channel_id)?.waiter = Some(task);
+    Ok(())
+}
+
+/// Forget `task`'s wait on `channel_id` (deadline passed, or the task exited).
+pub fn cancel_waiter(channel_id: u32, task: usize) {
+    if let Ok(ch) = channel_mut(channel_id)
+        && ch.waiter == Some(task)
+    {
+        ch.waiter = None;
     }
-    let msg = ch.buf[ch.tail];
-    ch.tail = (ch.tail + 1) % CHANNEL_CAP;
-    ch.count -= 1;
-    Some(msg)
+}
+
+/// The task holding RECV on `channel_id`, for attribution.
+pub fn set_receiver(channel_id: u32, task: usize) {
+    if let Ok(ch) = channel_mut(channel_id) {
+        ch.receiver = task as u16;
+    }
+}
+
+fn channel_mut(channel_id: u32) -> Result<&'static mut Channel, Error> {
+    let id = channel_id as usize;
+    if id >= MAX_CHANNELS {
+        return Err(Error::InvalidChannel);
+    }
+    let ch = unsafe { &mut (*channels())[id] };
+    if ch.active { Ok(ch) } else { Err(Error::InvalidChannel) }
 }
 
 /// How many channels are active.

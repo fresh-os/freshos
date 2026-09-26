@@ -12,9 +12,11 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use freshos_abi::{USER_BASE, USER_SIZE, USER_STACK_SIZE};
+use freshos_abi::{Error, USER_BASE, USER_SIZE, USER_STACK_SIZE};
 
 use crate::frame_alloc;
+use crate::handles::HandleTable;
+use crate::ipc::Message;
 use crate::serial::serial_println;
 
 use super::addrspace::{AddressSpace, Perm, PAGE};
@@ -41,12 +43,23 @@ enum State {
     Blocked,
 }
 
+/// An EL0 task blocked in the recv syscall: where its message goes, and
+/// when it gives up.
+#[derive(Clone, Copy)]
+struct UserWait {
+    channel: u32,
+    buf: u64,
+    deadline_ns: u64, // 0 = none
+}
+
 struct Task {
     sp: u64, // saved frame (kernel stack, after save_all_regs)
     kernel_stack_bottom: u64,
     kernel_stack_pages: usize,
     ttbr0: u64, // TTBR0_EL1 to load when this task runs
     space: Option<AddressSpace>,
+    handles: HandleTable,
+    wait: Option<UserWait>,
     state: State,
 }
 
@@ -56,6 +69,8 @@ const EMPTY_TASK: Task = Task {
     kernel_stack_pages: 0,
     ttbr0: 0,
     space: None,
+    handles: HandleTable::EMPTY,
+    wait: None,
     state: State::Free,
 };
 
@@ -196,6 +211,7 @@ extern "C" fn scheduler_tick_arm(stack_ptr: u64) -> u64 {
     let intid = gic::acknowledge();
     timer::handle_irq();
     gic::end_of_interrupt(intid);
+    expire_waits(super::time_ns());
     switch_away(stack_ptr)
 }
 
@@ -243,6 +259,63 @@ fn run(t: &mut [Task; MAX_TASKS], next: usize) -> u64 {
 pub fn current_space() -> Option<&'static AddressSpace> {
     let t = unsafe { &*tasks() };
     t[CURRENT.load(Ordering::SeqCst)].space.as_ref()
+}
+
+/// The current task's handle table (None for kernel tasks, which have none).
+pub fn current_handles() -> Option<&'static HandleTable> {
+    let t = unsafe { &*tasks() };
+    let task = &t[CURRENT.load(Ordering::SeqCst)];
+    task.space.as_ref().map(|_| &task.handles)
+}
+
+/// Block the current task in recv: the frame is saved by switch_away.
+pub fn set_user_wait(channel: u32, buf: u64, deadline_ns: u64) {
+    let t = unsafe { &mut *tasks() };
+    let cur = CURRENT.load(Ordering::SeqCst);
+    t[cur].wait = Some(UserWait { channel, buf, deadline_ns });
+    t[cur].state = State::Blocked;
+}
+
+pub fn has_user_wait(task: usize) -> bool {
+    let t = unsafe { &*tasks() };
+    task < MAX_TASKS && t[task].wait.is_some()
+}
+
+/// Finish `task`'s recv: copy `message` into its buffer (validated when it
+/// blocked) through the task's own address space, set its result, and make
+/// it ready. Callers run with IRQs masked.
+pub fn complete_user_recv(task: usize, message: &Message) {
+    let t = unsafe { &mut *tasks() };
+    let Some(wait) = t[task].wait.take() else { return };
+    let result = match t[task].space.as_ref() {
+        Some(space) => match super::addrspace::write_user(space, wait.buf, message) {
+            Ok(()) => 0i64,
+            Err(e) => e as i64,
+        },
+        None => Error::NotPermitted as i64,
+    };
+    set_saved_x0(t[task].sp, result);
+    t[task].state = State::Ready;
+}
+
+/// Wake every task whose recv deadline has passed, with Timeout.
+fn expire_waits(now_ns: u64) {
+    let t = unsafe { &mut *tasks() };
+    for (id, task) in t.iter_mut().enumerate().skip(1) {
+        let Some(wait) = task.wait else { continue };
+        if wait.deadline_ns != 0 && now_ns >= wait.deadline_ns {
+            crate::ipc::cancel_waiter(wait.channel, id);
+            task.wait = None;
+            set_saved_x0(task.sp, Error::Timeout as i64);
+            task.state = State::Ready;
+        }
+    }
+}
+
+/// Write a blocked task's syscall result into x0 of its saved frame (frame
+/// offset 0), which lives on its kernel stack.
+fn set_saved_x0(frame: u64, value: i64) {
+    unsafe { *(frame as *mut u64) = value as u64 };
 }
 
 /// Initialise the scheduler with task 0 (the boot/idle task).
@@ -318,10 +391,15 @@ pub enum SpawnError {
 /// Start an EL0 task from an ELF image, in its own address space. `arg0` and
 /// `arg1` arrive in x0 and x1 at the entry point (freshos-rt passes them to
 /// `main` as the handle count and the service's argument).
-pub fn spawn_el0(image: &[u8], arg0: u64, arg1: u64) -> Result<usize, SpawnError> {
+pub fn spawn_el0(
+    image: &[u8],
+    handles: HandleTable,
+    arg0: u64,
+    arg1: u64,
+) -> Result<usize, SpawnError> {
     reap_pending_frees(0);
     let id = claim_slot().ok_or(SpawnError::NoSlot)?;
-    match build_el0(id, image, arg0, arg1) {
+    match build_el0(id, image, handles, arg0, arg1) {
         Ok((task, entry)) => {
             install(id, task);
             serial_println!("    task {} el0 asid={} entry={:#x}", id, id, entry);
@@ -337,7 +415,13 @@ pub fn spawn_el0(image: &[u8], arg0: u64, arg1: u64) -> Result<usize, SpawnError
 /// Build the task for slot `id` (claimed, so its ASID is ours). On error,
 /// everything allocated here is freed: the space by its drop, and the
 /// kernel stack is allocated last.
-fn build_el0(id: usize, image: &[u8], arg0: u64, arg1: u64) -> Result<(Task, u64), SpawnError> {
+fn build_el0(
+    id: usize,
+    image: &[u8],
+    handles: HandleTable,
+    arg0: u64,
+    arg1: u64,
+) -> Result<(Task, u64), SpawnError> {
     // The ASID is the task slot: unique among live tasks, and flushed when
     // the space is dropped, before the slot can be reused.
     let mut space = AddressSpace::new(id as u16).map_err(|_| SpawnError::OutOfMemory)?;
@@ -376,6 +460,8 @@ fn build_el0(id: usize, image: &[u8], arg0: u64, arg1: u64) -> Result<(Task, u64
         kernel_stack_pages: KERNEL_STACK_SIZE / 4096,
         ttbr0,
         space: Some(space),
+        handles,
+        wait: None,
         state: State::Ready,
     };
     Ok((task, entry))
@@ -443,6 +529,10 @@ pub fn retire_current(reason: u64) {
         return;
     }
     let t = unsafe { &mut *tasks() };
+    // A task that exits (or faults) while waiting leaves no waiter behind.
+    if let Some(wait) = t[cur].wait.take() {
+        crate::ipc::cancel_waiter(wait.channel, cur);
+    }
     // Never keep running on a table that is about to be freed.
     activate(KERNEL_TTBR0.load(Ordering::SeqCst));
     drop(t[cur].space.take());

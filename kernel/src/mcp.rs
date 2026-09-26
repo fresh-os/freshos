@@ -57,7 +57,7 @@ const VIEWS: &[View] = &[
     },
     View {
         name: "metrics",
-        description: "Latency metrics in microseconds (latest and max): compositor frame phases, input-to-photon, IPC round trip and scheduler wake-up.",
+        description: "Latency metrics in microseconds (latest and max): compositor frame phases, input-to-photon and scheduler wake-up; IPC delivery time in nanoseconds.",
         read: metrics_view,
     },
 ];
@@ -304,7 +304,7 @@ fn metrics_view() -> Value {
         "windows": sample(snapshot.windows_us),
         "chrome": sample(snapshot.chrome_us),
         "input_to_photon": sample(snapshot.input_to_photon_us),
-        "ipc_round_trip": sample(snapshot.ipc_rtt_us),
+        "ipc_delivery": { "latest_ns": snapshot.ipc_delivery_ns.latest, "max_ns": snapshot.ipc_delivery_ns.max },
         "scheduler_wake": sample(snapshot.sched_wake_us),
     })
 }

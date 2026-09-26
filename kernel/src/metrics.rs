@@ -27,7 +27,7 @@ pub struct Snapshot {
     pub windows_us: MetricSample,
     pub chrome_us: MetricSample,
     pub input_to_photon_us: MetricSample,
-    pub ipc_rtt_us: MetricSample,
+    pub ipc_delivery_ns: MetricSample,
     pub sched_wake_us: MetricSample,
 }
 
@@ -49,8 +49,8 @@ static CHROME_US_MAX: AtomicU64 = AtomicU64::new(0);
 static INPUT_TO_PHOTON_US_LATEST: AtomicU64 = AtomicU64::new(0);
 static INPUT_TO_PHOTON_US_MAX: AtomicU64 = AtomicU64::new(0);
 
-static IPC_RTT_US_LATEST: AtomicU64 = AtomicU64::new(0);
-static IPC_RTT_US_MAX: AtomicU64 = AtomicU64::new(0);
+static IPC_DELIVERY_NS_LATEST: AtomicU64 = AtomicU64::new(0);
+static IPC_DELIVERY_NS_MAX: AtomicU64 = AtomicU64::new(0);
 
 static SCHED_WAKE_US_LATEST: AtomicU64 = AtomicU64::new(0);
 static SCHED_WAKE_US_MAX: AtomicU64 = AtomicU64::new(0);
@@ -94,8 +94,8 @@ pub fn record_input_to_photon_us(value: u64) {
     store_sample(&INPUT_TO_PHOTON_US_LATEST, &INPUT_TO_PHOTON_US_MAX, value);
 }
 
-pub fn record_ipc_rtt_us(value: u64) {
-    store_sample(&IPC_RTT_US_LATEST, &IPC_RTT_US_MAX, value);
+pub fn record_ipc_delivery_ns(value: u64) {
+    store_sample(&IPC_DELIVERY_NS_LATEST, &IPC_DELIVERY_NS_MAX, value);
 }
 
 pub fn record_sched_wake_us(value: u64) {
@@ -259,9 +259,9 @@ pub fn snapshot() -> Snapshot {
             latest: INPUT_TO_PHOTON_US_LATEST.load(Ordering::Relaxed),
             max: INPUT_TO_PHOTON_US_MAX.load(Ordering::Relaxed),
         },
-        ipc_rtt_us: MetricSample {
-            latest: IPC_RTT_US_LATEST.load(Ordering::Relaxed),
-            max: IPC_RTT_US_MAX.load(Ordering::Relaxed),
+        ipc_delivery_ns: MetricSample {
+            latest: IPC_DELIVERY_NS_LATEST.load(Ordering::Relaxed),
+            max: IPC_DELIVERY_NS_MAX.load(Ordering::Relaxed),
         },
         sched_wake_us: MetricSample {
             latest: SCHED_WAKE_US_LATEST.load(Ordering::Relaxed),

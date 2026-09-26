@@ -12,6 +12,8 @@ mod font;
 mod font_aa;
 mod frame_alloc;
 mod framebuffer;
+#[cfg(target_arch = "aarch64")]
+mod handles;
 mod heap;
 pub mod ipc;
 mod metrics;
@@ -28,8 +30,6 @@ mod arm_tasks;
 mod init_abi;
 #[cfg(target_arch = "aarch64")]
 mod mcp;
-#[cfg(target_arch = "aarch64")]
-mod service_abi;
 #[cfg(target_arch = "aarch64")]
 mod syscalls;
 
@@ -298,6 +298,8 @@ fn main() -> Status {
     let _ = ipc::create().expect("ch1: shell keys");
     let _ = ipc::create().expect("ch2: probe ping");
     let _ = ipc::create().expect("ch3: probe pong");
+    let _ = ipc::create().expect("ch4: probe sink");
+    let _ = ipc::create().expect("ch5: probe-chan own");
     serial_println!("  {} IPC channels", ipc::channel_count());
 
     // ---- Scheduler: spawn tasks ----
@@ -326,24 +328,6 @@ fn main() -> Status {
             }
         }
     });
-
-    if let Some(bytes) = boot_images::find("PONG.ELF") {
-        match elf::load_image(bytes) {
-            Ok(image) => {
-                arch::paging::make_executable(image.base, image.size as u64);
-                service_abi::register_external_pong(image.entry);
-                serial_println!(
-                    "  Pong ELF loaded: base={:#x} size={} entry={:#x}",
-                    image.base,
-                    image.size,
-                    image.entry
-                );
-            }
-            Err(err) => {
-                serial_println!("  Pong ELF load failed: {}", err);
-            }
-        }
-    }
 
     if let Some(image) = loaded_init {
         arch::context::spawn_with_arg(image.entry, init_abi::api_ptr() as u64);

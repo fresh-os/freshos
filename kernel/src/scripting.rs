@@ -29,7 +29,7 @@ pub fn create_engine() -> Engine {
             payload: [data as u64, 0, 0, 0],
         };
         match ipc::send(channel as u32, &msg) {
-            Ok(()) => 0,
+            Ok(_) => 0,
             Err(_) => -1,
         }
     });

@@ -5,9 +5,11 @@
 /// hardware fault, handled in exceptions.rs.
 use core::fmt::Write;
 
-use freshos_abi::{Error, ExitReason, MAX_LOG, sys};
+use freshos_abi::{Error, ExitReason, Handle, MAX_LOG, Message, Rights, sys};
 
-use crate::arch::addrspace::{AddressSpace, copy_from_user};
+use crate::arch::addrspace::{
+    AddressSpace, check_writable, copy_from_user, read_user, write_user,
+};
 use crate::arch::context;
 
 pub enum Outcome {
@@ -18,12 +20,8 @@ pub enum Outcome {
     /// The caller exited; never resume it.
     Exited,
     /// The caller is waiting; its x0 is written when it's woken.
-    // Produced from Task 6 (IPC) onwards.
-    #[allow(dead_code)]
     Blocked,
     /// A send woke this task: run it next. The caller resumes with 0.
-    // Produced from Task 6 (IPC) onwards.
-    #[allow(dead_code)]
     HandOff(usize),
 }
 
@@ -37,12 +35,64 @@ fn space() -> Result<&'static AddressSpace, Error> {
 
 pub fn dispatch(nr: u64, a: [u64; 6]) -> Outcome {
     match nr {
+        sys::SEND => send(a[0], a[1]),
+        sys::RECV => recv(a[0], a[1], a[2], true),
+        sys::TRY_RECV => recv(a[0], a[1], 0, false),
         sys::YIELD => Outcome::Yield,
         sys::EXIT => exit(a[0]),
         sys::TIME_NS => Outcome::Return(crate::arch::time_ns() as i64),
         sys::LOG => log(a[0], a[1]),
         _ => err(Error::NoSuchSyscall),
     }
+}
+
+/// The channel behind the caller's `handle`, if the handle carries `need`.
+fn channel(handle: u64, need: Rights) -> Result<u32, Error> {
+    let handles = context::current_handles().ok_or(Error::NotPermitted)?;
+    let handle = u32::try_from(handle).map_err(|_| Error::NoSuchHandle)?;
+    handles.lookup(Handle(handle), need)
+}
+
+fn send(handle: u64, ptr: u64) -> Outcome {
+    let run = || -> Result<Outcome, Error> {
+        let channel = channel(handle, Rights::SEND)?;
+        let message: Message = read_user(space()?, ptr)?;
+        match crate::ipc::send(channel, &message) {
+            Ok(Some(woken)) => Ok(Outcome::HandOff(woken)),
+            Ok(None) => Ok(Outcome::Return(0)),
+            Err(crate::ipc::Error::Full) => Err(Error::Full),
+            Err(_) => Err(Error::NoSuchHandle),
+        }
+    };
+    run().unwrap_or_else(err)
+}
+
+/// Receive into `buf`. Blocking with nothing waiting, the caller switches
+/// away; a later send delivers straight into `buf`, or the tick after
+/// `deadline_ns` (0 = none) wakes it with Timeout.
+fn recv(handle: u64, buf: u64, deadline_ns: u64, blocking: bool) -> Outcome {
+    let run = || -> Result<Outcome, Error> {
+        let channel = channel(handle, Rights::RECV)?;
+        let space = space()?;
+        // Validate the destination first, so a bad buffer is refused even
+        // when a message is waiting.
+        check_writable::<Message>(space, buf)?;
+        match crate::ipc::try_dequeue(channel).map_err(|_| Error::NoSuchHandle)? {
+            Some(message) => {
+                write_user(space, buf, &message)?;
+                Ok(Outcome::Return(0))
+            }
+            None if !blocking => Err(Error::WouldBlock),
+            None if deadline_ns != 0 && crate::arch::time_ns() >= deadline_ns => Err(Error::Timeout),
+            None => {
+                crate::ipc::register_waiter(channel, context::current_task())
+                    .map_err(|_| Error::NoSuchHandle)?;
+                context::set_user_wait(channel, buf, deadline_ns);
+                Ok(Outcome::Blocked)
+            }
+        }
+    };
+    run().unwrap_or_else(err)
 }
 
 fn exit(reason: u64) -> Outcome {

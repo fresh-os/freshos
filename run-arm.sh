@@ -31,7 +31,7 @@ if [[ "${1:-}" == "--release" ]]; then
 fi
 
 # Every userbin, by package name without the "freshos-" prefix.
-USERBINS="init pong pulse fault ${EXTRA_ELFS:-}"
+USERBINS="init ping pong pulse fault ${EXTRA_ELFS:-}"
 
 TARGET_DIR="$SCRIPT_DIR/target/aarch64-unknown-uefi/$PROFILE"
 USER_TARGET_DIR="$SCRIPT_DIR/target/aarch64-unknown-none/$PROFILE"

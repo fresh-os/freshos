@@ -1,7 +1,10 @@
 use core::slice;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use freshos_abi::Rights;
+
 use crate::arch;
+use crate::handles::{HandleTable, Slot};
 use crate::serial::serial_println;
 
 pub const SERVICE_KBD: u64 = 1;
@@ -18,6 +21,7 @@ pub const SERVICE_PROBE_BAD_UNMAPPED: u64 = 11;
 pub const SERVICE_PROBE_BAD_CODE: u64 = 12;
 pub const SERVICE_PROBE_BAD_STACK: u64 = 13;
 pub const SERVICE_PROBE_ABI: u64 = 14;
+pub const SERVICE_PROBE_CHAN: u64 = 15;
 
 pub const SERVICE_FLAG_AUTOSTART: u64 = 1 << 0;
 pub const SERVICE_FLAG_SUPERVISED: u64 = 1 << 1;
@@ -28,7 +32,7 @@ pub const SERVICE_EXIT_NONE: u64 = 0;
 pub const SERVICE_EXIT_CLEAN: u64 = 1;
 pub const SERVICE_EXIT_FAULT: u64 = 2;
 
-const SERVICE_COUNT: usize = 14;
+const SERVICE_COUNT: usize = 15;
 const SERVICE_NAME_BYTES: usize = 16;
 
 #[repr(C)]
@@ -94,27 +98,16 @@ fn spawn_dash_service() -> Option<usize> {
     Some(arch::context::spawn(crate::arm_tasks::dashboard_el1))
 }
 
-fn spawn_ping_service() -> Option<usize> {
-    Some(arch::context::spawn(crate::arm_tasks::ipc_probe_ping_el1))
-}
-
-fn spawn_pong_service() -> Option<usize> {
-    if let Some(entry) = crate::service_abi::external_pong_entry() {
-        Some(arch::context::spawn_with_arg(entry, crate::service_abi::probe_api_ptr() as u64))
-    } else {
-        Some(arch::context::spawn(crate::arm_tasks::ipc_probe_pong_el1))
-    }
-}
-
 fn spawn_mcp_service() -> Option<usize> {
     Some(arch::context::spawn(crate::mcp::bridge_el1))
 }
 
-/// Start `binary` from the ESP at EL0, with `arg` for its `main`. A missing
-/// file is silent (the probes are only staged for test boots).
-fn spawn_image(binary: &str, arg: u64) -> Option<usize> {
+/// Start `binary` from the ESP at EL0 with `handles`, of which the first
+/// `handle_count` are its granted handles 0.., and `arg` for its `main`. A
+/// missing file is silent (the probes are only staged for test boots).
+fn spawn_image(binary: &str, handles: HandleTable, handle_count: u64, arg: u64) -> Option<usize> {
     let image = crate::boot_images::find(binary)?;
-    match arch::context::spawn_el0(image, 0, arg) {
+    match arch::context::spawn_el0(image, handles, handle_count, arg) {
         Ok(id) => Some(id),
         Err(arch::context::SpawnError::BadImage(reason)) => {
             serial_println!("[init] cannot start {}: bad image: {}", binary, reason);
@@ -127,15 +120,45 @@ fn spawn_image(binary: &str, arg: u64) -> Option<usize> {
     }
 }
 
+/// A handle table granting `slots`, in order, as handles 0...
+fn grants(slots: &[(u32, Rights)]) -> HandleTable {
+    let mut table = HandleTable::EMPTY;
+    for &(channel, rights) in slots {
+        let _ = table.insert(Slot { channel, rights });
+    }
+    table
+}
+
+/// ping sends on channel 2 and receives on channel 3; pong the reverse.
+fn spawn_ping_service() -> Option<usize> {
+    let id = spawn_image("PING.ELF", grants(&[(2, Rights::SEND), (3, Rights::RECV)]), 2, 0)?;
+    crate::ipc::set_receiver(3, id);
+    Some(id)
+}
+
+fn spawn_pong_service() -> Option<usize> {
+    let id = spawn_image("PONG.ELF", grants(&[(2, Rights::RECV), (3, Rights::SEND)]), 2, 0)?;
+    crate::ipc::set_receiver(2, id);
+    Some(id)
+}
+
+/// Test-only (PROBECHA.ELF is staged only by the test harness): sends on the
+/// sink, channel 4, which nobody receives on, and receives on channel 5.
+fn spawn_probe_chan() -> Option<usize> {
+    let id = spawn_image("PROBECHA.ELF", grants(&[(4, Rights::SEND), (5, Rights::RECV)]), 2, 0)?;
+    crate::ipc::set_receiver(5, id);
+    Some(id)
+}
+
 fn spawn_fault_service() -> Option<usize> {
     if crate::boot_images::find("FAULT.ELF").is_none() {
         serial_println!("[init] FAULT.ELF missing");
     }
-    spawn_image("FAULT.ELF", 0)
+    spawn_image("FAULT.ELF", HandleTable::EMPTY, 0, 0)
 }
 
 fn spawn_pulse_service() -> Option<usize> {
-    spawn_image("PULSE.ELF", 0)
+    spawn_image("PULSE.ELF", HandleTable::EMPTY, 0, 0)
 }
 
 // Test-only (PROBEBAD.ELF is staged only by the test harness). Each attempts
@@ -144,25 +167,25 @@ fn spawn_pulse_service() -> Option<usize> {
 // also covers every other task's frames, is EL1-only, so that one probe
 // stands for both "kernel memory" and "another service's frames".
 fn spawn_probe_bad_kernel() -> Option<usize> {
-    spawn_image("PROBEBAD.ELF", 0x4000_0000)
+    spawn_image("PROBEBAD.ELF", HandleTable::EMPTY, 0, 0x4000_0000)
 }
 
 fn spawn_probe_bad_unmapped() -> Option<usize> {
-    spawn_image("PROBEBAD.ELF", 0x4_2000_0000)
+    spawn_image("PROBEBAD.ELF", HandleTable::EMPTY, 0, 0x4_2000_0000)
 }
 
 fn spawn_probe_bad_code() -> Option<usize> {
-    spawn_image("PROBEBAD.ELF", 0)
+    spawn_image("PROBEBAD.ELF", HandleTable::EMPTY, 0, 0)
 }
 
 fn spawn_probe_bad_stack() -> Option<usize> {
-    spawn_image("PROBEBAD.ELF", 1)
+    spawn_image("PROBEBAD.ELF", HandleTable::EMPTY, 0, 1)
 }
 
 /// Test-only: checks log sanitising, bad pointers, unknown syscalls and
 /// FP/SIMD state across switches, then exits cleanly.
 fn spawn_probe_abi() -> Option<usize> {
-    spawn_image("PROBEBAD.ELF", 2)
+    spawn_image("PROBEBAD.ELF", HandleTable::EMPTY, 0, 2)
 }
 
 static SERVICES: [ServiceDefinition; SERVICE_COUNT] = [
@@ -263,6 +286,13 @@ static SERVICES: [ServiceDefinition; SERVICE_COUNT] = [
         flags: SERVICE_FLAG_AUTOSTART,
         restart_period_ticks: 0,
         spawn: spawn_probe_abi,
+    },
+    ServiceDefinition {
+        id: SERVICE_PROBE_CHAN,
+        name: "probe-chan",
+        flags: SERVICE_FLAG_AUTOSTART,
+        restart_period_ticks: 0,
+        spawn: spawn_probe_chan,
     },
 ];
 
