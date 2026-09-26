@@ -44,20 +44,22 @@ class SupervisionTest(FreshOSTestCase):
             )
 
         def frames_between_fault_runs() -> int:
-            # Sample while fault is down, so no instance's frames are counted,
-            # and while pulse is up, so its are always counted. Each is down
-            # for only a few hundred ms, so keep only a sample taken with the
-            # same state, and the same restart counts, on both sides of it.
+            # Sample while fault and pulse are both up: neither allocates
+            # while it runs, so every running instance holds the same frames,
+            # and a leak shows as fewer free frames per restart. Keep only a
+            # sample taken with the same state, and the same restart counts,
+            # on both sides of it. (Sampling while fault is down needed three
+            # MCP round trips inside its 200 ms restart delay, which flaked.)
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
                 before = state()
-                if before[0] or not before[2]:
+                if not (before[0] and before[2]):
                     time.sleep(0.02)
                     continue
                 frames = self.boot.mcp().view("system")["frames_free"]
                 if state() == before:
                     return frames
-            self.fail("no sample with fault down and pulse up")
+            self.fail("no sample with fault and pulse both up")
 
         def restarts() -> int:
             # mcp starts first, so fault may not be registered yet.
