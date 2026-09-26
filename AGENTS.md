@@ -101,7 +101,7 @@ The design is in `docs/plans/2026-09-26-el0-isolation-design.md`. This section i
 - **Kernel stacks:** 32 KiB per task. A canary at the bottom is checked on every switch and when a task exits or faults, and an overrun panics naming the task. The MCP `tasks` view shows each task's `stack_peak_bytes`. There are no guard pages yet.
 - **Direct hand-off:** a send to a waiting receiver runs that receiver next. A blocking `recv` switches away at once.
 - **Sender-return:** if the hand-off target then blocks while its donor is still Ready, the donor runs next. Otherwise the choice is round-robin. Every timer tick clears the hand-off and rotates, so fairness holds at tick granularity (1 ms).
-- The ping/pong median round trip was 10–28 µs across four runs on QEMU with HVF (`tests/test_latency.py`), down from about 10.8 ms before hand-off.
+- The ping/pong median round trip was 10–42 µs across seven runs on QEMU with HVF (`tests/test_latency.py`), down from about 10.8 ms before hand-off.
 
 ### The ABI, the runtime and the syscalls
 

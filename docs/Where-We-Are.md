@@ -19,7 +19,7 @@ that `init` grants, one receiving process per channel. The kernel starts only
 `init`, which starts and supervises everything else; the kernel's registry
 records every spawn and exit, and the MCP bridge and flow view read it. Direct
 hand-off took the steady-state ping/pong median round trip from about 10.8 ms
-to 10–28 µs (four runs), under the spec's 100 µs target. 31 automated tests cover it
+to 10–42 µs (seven runs), under the spec's 100 µs target. 31 automated tests cover it
 (`./test.sh`); `AGENTS.md` describes the model.
 
 **▶ Next:** move the in-kernel built-ins out to EL0, one spec each: the keyboard
@@ -29,10 +29,10 @@ driver, dashboard, MCP bridge, shell and compositor. Each spec deletes its
 **Known gaps to verify or close:**
 
 - Verify on a real Pi 4: the no-PAN path, I-cache maintenance and the GICv2 board path.
-- On a real PL011 at 115200 baud, a 256-byte LOG busy-writes for about 23 ms with IRQs masked; it needs a log ring.
+- On a real PL011 at 115200 baud, every console line is written with IRQs masked (a 256-byte LOG takes about 23 ms; kernel lines such as `[mcp] <method>` several ms); it needs a log ring.
 - Kernel stacks have no guard pages; the canary only detects an overrun.
 - The keyboard channel holds 16 events, so a burst of keys loses some.
-- Serial lines from different tasks can interleave.
+- `SCTLR_EL1` nTWI/nTWE are inherited from the firmware, so EL0 `wfi`/`wfe` may not trap; set them at boot.
 - `probe-bad-kernel` hardcodes QEMU's RAM base, `0x4000_0000`.
 - Untested: `init`'s own death (the kernel's halt), the exit-notice backlog when `init`'s inbox is full, a `recv` deadline timing out, and the path without PAN.
 - After a receiver exits and its `RECV` right can't go home, the trace still attributes the channel's messages to its last consumer, which has exited (its slot may already hold another task).
