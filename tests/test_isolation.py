@@ -25,6 +25,16 @@ class IsolationTest(FreshOSTestCase):
         self.assertEqual(self.boot.find_logs(r"SURVIVED"), [])
         self.assertTrue(self.services()["pong"]["running"])
 
+    def test_el0_cannot_read_the_counter(self) -> None:
+        # CNTKCTL_EL1 = 0 at boot: freshos-rt reads time by syscall, so a
+        # direct counter read from EL0 traps and terminates the task.
+        self.wait_until(
+            lambda: self.services().get("probe-counter", {}).get("last_exit") == "fault",
+            timeout=20,
+            message="probe-counter to fault",
+        )
+        self.assertEqual(self.boot.find_logs(r"^\[probe-counter\] counter "), [])
+
     def test_logs_are_prefixed_with_the_kernel_registered_name(self) -> None:
         self.boot.wait_for_log(r"^\[pulse\] start$", timeout=20)
 

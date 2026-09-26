@@ -91,6 +91,7 @@ The design is in `docs/plans/2026-09-26-el0-isolation-design.md`. This section i
 - **The kernel never dereferences a user virtual address.** `copy_from_user`/`copy_to_user` (`addrspace.rs`) check the whole range against the task's own table, then copy through the kernel's map of the physical frame.
 - **PAN** is detected at boot and turned on where the CPU has it (it does under QEMU with HVF). **The Pi 4's Cortex-A72 (ARMv8.0) has no PAN**; there the copy discipline is the only enforcement.
 - **I-cache maintenance** (`paging::sync_icache`) runs after the loader writes code. Apple cores don't need it; the Pi 4 does.
+- **EL0-facing controls are set at boot, not inherited** (`paging::init`): `CNTKCTL_EL1 = 0` (no counter or timer access at EL0; `time_ns` is a syscall), and `SCTLR_EL1` UMA, DZE, UCT and UCI cleared (no DAIF, `dc zva`, `CTR_EL0` or cache maintenance at EL0; nothing uses them). The boot log prints what the firmware left. `TPIDRRO_EL0` is zeroed, and the TLB is flushed (`tlbi vmalle1is`) before the first user space exists. A userbin that needs any of these must change `paging::init` first.
 - A fault at EL0 terminates only that task, with reason `fault`, under the banner `*** EL0 TASK FAULT ***`. A fault at EL1 while an EL0 task is current happened in the kernel (a syscall or an IRQ on that task's behalf), so it panics with ESR, FAR, ELR and the task's id and name, and says when it is a PAN violation. An EL1 built-in's own fault still terminates only that built-in (`*** TASK FAULT ***`).
 
 ### Tasks and scheduling (`arch/aarch64/context.rs`)

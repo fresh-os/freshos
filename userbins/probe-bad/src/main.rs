@@ -11,13 +11,20 @@ entry!(main);
 ///   boundary (log sanitising and capping, bad pointers, unknown syscalls,
 ///   TPIDR_EL0 and FP/SIMD state across switches) and exit cleanly,
 ///   3 = only the TPIDR_EL0 check, as a second instance writing its own value
-///   at the same time, else = read that address.
+///   at the same time, 4 = read the virtual counter (CNTVCT_EL0), which the
+///   kernel denies EL0, else = read that address.
 /// The forbidden accesses should never survive.
 fn main(start: Startup) -> ! {
     match start.arg() {
         3 => {
             check_tpidr();
             exit()
+        }
+        4 => {
+            log!("reading the virtual counter");
+            let ticks: u64;
+            unsafe { core::arch::asm!("mrs {}, CNTVCT_EL0", out(reg) ticks, options(nomem, nostack)) };
+            log!("counter {ticks:#x}");
         }
         0 => {
             log!("writing to own code");

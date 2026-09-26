@@ -2,8 +2,9 @@
 ///
 /// UEFI's identity map stays the kernel's map, EL1-only, in every address
 /// space (see `addrspace`, which builds each EL0 task's own table from it).
-/// `init` sets up the system registers for that: WXN off, PAN on, and the
-/// ASID taken from TTBR0.
+/// `init` sets up the system registers for that: WXN off, PAN on, the ASID
+/// taken from TTBR0, and every EL0-facing control set to a known value
+/// rather than whatever the firmware left.
 use crate::serial::serial_println;
 
 const ADDR_MASK: u64 = 0x0000_FFFF_FFFF_F000;
@@ -17,8 +18,9 @@ pub fn pan_enabled() -> bool {
     PAN_ON.load(core::sync::atomic::Ordering::SeqCst)
 }
 
-/// Turn WXN off and PAN on (where the CPU has it), clear TCR.A1, and hand the firmware's table to
-/// `addrspace`.
+/// Turn WXN off and PAN on (where the CPU has it), deny EL0 the system
+/// registers and instructions it doesn't need, clear TCR.A1, flush the TLB,
+/// and hand the firmware's table to `addrspace`.
 ///
 /// Returns the current TTBR0 (unchanged).
 ///
@@ -57,10 +59,21 @@ pub unsafe fn init() -> u64 {
     unsafe {
         core::arch::asm!("mrs {}, SCTLR_EL1", out(reg) sctlr, options(nomem, nostack));
     }
+    // The EL0-facing bits as the firmware left them, logged below: on the
+    // Pi 4 they are unverified, and this shows what the kernel overrode.
+    let el0_bits: u64 = (1 << 9) | (1 << 14) | (1 << 15) | (1 << 26);
+    let firmware_sctlr_el0 = sctlr & el0_bits;
     sctlr &= !(1 << 19); // WXN=0
     if has_pan {
         sctlr &= !(1 << 23); // SPAN=0
     }
+    // What EL0 may do directly. Nothing in freshos-rt or any userbin needs
+    // these (checked in the source and the disassembly), so each is denied
+    // and traps to EL1, where it is an EL0 fault:
+    sctlr &= !(1 << 9); // UMA=0: no `msr DAIFSet/DAIFClr` at EL0 (no masking IRQs)
+    sctlr &= !(1 << 14); // DZE=0: no `dc zva` at EL0
+    sctlr &= !(1 << 15); // UCT=0: no CTR_EL0 reads at EL0
+    sctlr &= !(1 << 26); // UCI=0: no cache maintenance (dc cvau/civac/cvac, ic ivau) at EL0
     unsafe {
         core::arch::asm!("msr SCTLR_EL1, {}", in(reg) sctlr, options(nomem, nostack));
         core::arch::asm!("isb", options(nomem, nostack));
@@ -85,11 +98,33 @@ pub unsafe fn init() -> u64 {
         core::arch::asm!("msr TPIDRRO_EL0, xzr", options(nomem, nostack));
     }
 
+    // CNTKCTL_EL1 = 0: EL0 may not read the physical or virtual counter
+    // (EL0PCTEN, EL0VCTEN) or touch either timer (EL0PTEN, EL0VTEN), and no
+    // event stream (EVNTEN). freshos-rt reads time through the TIME_NS
+    // syscall, so EL0 needs none of it.
+    let firmware_cntkctl: u64;
+    unsafe {
+        core::arch::asm!("mrs {}, CNTKCTL_EL1", out(reg) firmware_cntkctl, options(nomem, nostack));
+        core::arch::asm!("msr CNTKCTL_EL1, xzr", "isb", options(nomem, nostack));
+    }
+    serial_println!(
+        "  EL0 controls: firmware left CNTKCTL_EL1={:#x}, SCTLR_EL1 UMA/DZE/UCT/UCI bits={:#x}; all now 0",
+        firmware_cntkctl,
+        firmware_sctlr_el0
+    );
+
     // TCR_EL1.A1 = 0: the ASID comes from TTBR0, where each task's lives.
     let tcr = tcr & !(1 << 22);
     unsafe {
         core::arch::asm!("msr TCR_EL1, {}", in(reg) tcr, options(nomem, nostack));
         core::arch::asm!("isb", options(nomem, nostack));
+    }
+
+    // Before the first user space exists: drop every TLB entry the firmware
+    // may have left, under any ASID, so no stale translation can outlive the
+    // switch to per-task ASIDs.
+    unsafe {
+        core::arch::asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb", options(nostack));
     }
 
     let ram_va = core::ptr::addr_of!(TTBR0_ROOT) as u64;

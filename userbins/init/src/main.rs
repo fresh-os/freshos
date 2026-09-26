@@ -55,6 +55,7 @@ const TABLE: &[Service] = &[
     Service { arg: 1, optional: true, ..service("probe-bad-stack", "PROBEBAD.ELF") },
     Service { arg: 2, optional: true, ..service("probe-abi", "PROBEBAD.ELF") },
     Service { arg: 3, optional: true, ..service("probe-tpidr", "PROBEBAD.ELF") },
+    Service { arg: 4, optional: true, ..service("probe-counter", "PROBEBAD.ELF") },
     Service { grants: &[(SINK, SEND), (PROBE, RECV)], optional: true, ..service("probe-chan", "PROBECHA.ELF") },
     Service { grants: &[(PING, RECV)], optional: true, ..service("probe-dup-recv", "PROBECHA.ELF") },
     // Supervised so that its refused start is retried: MalformedElfTest checks
