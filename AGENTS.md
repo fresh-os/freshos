@@ -98,7 +98,7 @@ The design is in `docs/plans/2026-09-26-el0-isolation-design.md`. This section i
 
 - `MAX_TASKS` is 16 slots. Slot 0 is the boot/idle task.
 - **Exception frame:** `FRAME_SIZE` is 816 bytes. Every exception saves the general registers, eagerly the FP/SIMD state (q0–q31, FPCR, FPSR), and `TPIDR_EL0`, which EL0 can write, so each task has its own. A new task's frame is zeroed, so it starts with all of them 0. `TPIDRRO_EL0` is zeroed once at boot and never saved: EL0 can't write it and nothing uses it. `enable_fp` sets `CPACR_EL1.FPEN` at boot.
-- **Kernel stacks:** 32 KiB per task. A canary at the bottom is checked on every switch, and an overrun panics naming the task. The MCP `tasks` view shows each task's `stack_peak_bytes`. There are no guard pages yet.
+- **Kernel stacks:** 32 KiB per task. A canary at the bottom is checked on every switch and when a task exits or faults, and an overrun panics naming the task. The MCP `tasks` view shows each task's `stack_peak_bytes`. There are no guard pages yet.
 - **Direct hand-off:** a send to a waiting receiver runs that receiver next. A blocking `recv` switches away at once.
 - **Sender-return:** if the hand-off target then blocks while its donor is still Ready, the donor runs next. Otherwise the choice is round-robin. Every timer tick clears the hand-off and rotates, so fairness holds at tick granularity (1 ms).
 - The ping/pong median round trip was 10–28 µs across four runs on QEMU with HVF (`tests/test_latency.py`), down from about 10.8 ms before hand-off.

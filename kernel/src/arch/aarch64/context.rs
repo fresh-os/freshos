@@ -679,6 +679,10 @@ pub fn retire_current(reason: ExitReason) {
     if cur == 0 {
         return;
     }
+    // The switch away from here finds the slot Free and skips its canary,
+    // so an overrun on the exit or fault path must be caught now, while
+    // the slot still names the task.
+    check_canary(unsafe { &*tasks() }, cur);
     if cur == INIT_TASK.load(Ordering::SeqCst) {
         serial_println!(
             "init exited ({}): nothing supervises the system — halting",
