@@ -318,10 +318,10 @@ fn main() -> Status {
     let mut init_handles = handles::HandleTable::EMPTY;
     let _ = init_handles
         .insert(handles::Slot { channel: ipc::INIT_INBOX, rights: freshos_abi::Rights::RECV });
-    let bind = |id: usize| {
-        arch::context::set_init_task(id);
-        ipc::set_receiver(ipc::INIT_INBOX, id);
-        registry::on_spawn(id, b"init");
+    let bind = |task: freshos_abi::TaskRef| {
+        arch::context::set_init_task(task.id as usize);
+        ipc::set_receiver(ipc::INIT_INBOX, task.id as usize);
+        registry::on_spawn(task, b"init");
     };
     if let Err(err) = arch::context::spawn_el0(init_image, init_handles, 1, 0, bind) {
         serial_println!("INIT.ELF won't start: {:?} — nothing to run", err);

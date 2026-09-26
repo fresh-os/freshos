@@ -47,7 +47,7 @@ const VIEWS: &[View] = &[
     },
     View {
         name: "tasks",
-        description: "Running tasks by id, with the names the kernel registered for them.",
+        description: "Running tasks by id and generation, with the names the kernel registered for them and the deepest each has reached into its kernel stack.",
         read: tasks_view,
     },
     View {
@@ -242,6 +242,7 @@ fn services_view() -> Value {
             json!({
                 "name": s.name.as_str(),
                 "task": s.task,
+                "generation": s.generation,
                 "running": s.task.is_some(),
                 "restarts": s.starts.saturating_sub(1),
                 "exits": s.exits,
@@ -256,7 +257,14 @@ fn tasks_view() -> Value {
     let tasks: Vec<Value> = (0..arch::context::MAX_TASKS)
         .filter_map(|id| {
             let name = crate::registry::name(id);
-            (!name.is_empty()).then(|| json!({ "id": id, "name": name.as_str() }))
+            (!name.is_empty()).then(|| {
+                json!({
+                    "id": id,
+                    "generation": arch::context::task_ref(id).generation,
+                    "name": name.as_str(),
+                    "stack_peak_bytes": arch::context::stack_peak(id),
+                })
+            })
         })
         .collect();
     json!(tasks)

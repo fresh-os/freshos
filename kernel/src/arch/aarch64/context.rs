@@ -10,9 +10,11 @@
 /// `scheduler_tick_arm(sp)`, and gets back the new SP. On a task switch the
 /// scheduler also points TTBR0 at the next task's table.
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
-use freshos_abi::{Error, ExitReason, Handle, Rights, USER_BASE, USER_SIZE, USER_STACK_SIZE};
+use freshos_abi::{
+    Error, ExitReason, Handle, Rights, TaskRef, USER_BASE, USER_SIZE, USER_STACK_SIZE,
+};
 
 use crate::frame_alloc;
 use crate::handles::HandleTable;
@@ -24,12 +26,24 @@ use super::gic;
 use super::timer;
 
 pub const MAX_TASKS: usize = 16;
-/// 32 KiB kernel stack per task. Kernel stacks have no guard page, so an
-/// overflow silently corrupts the neighbouring task's stack. Measured in a
-/// debug build: the MCP bridge peaks near 14 KiB rendering a view, and init
-/// near 12 KiB in SPAWN (an ELF load, with a nested tick on top). 16 KiB
-/// overflowed.
+/// 32 KiB kernel stack per task. At 16 KiB the MCP bridge overflowed into
+/// its neighbour (init) in a debug build, before `services_view` iterated
+/// the registry by reference. Measured since then: the bridge peaks near
+/// 14 KiB and init near 12 KiB (SPAWN's ELF load with a nested tick). The
+/// rest is headroom for paths not measured: nested IRQ frames, Rhai in the
+/// shell, deeper MCP views. The MCP `tasks` view reports each task's peak.
+///
+/// Kernel stacks have no guard page yet (that waits for later memory work),
+/// so an overflow would silently corrupt the stack below. Instead each stack
+/// ends in a canary that every switch checks: an overflow panics, naming the
+/// task, at its next switch.
 const KERNEL_STACK_SIZE: usize = 4096 * 8;
+/// The canary: the lowest bytes of every kernel stack.
+const CANARY: u64 = 0x57AC_C0DE_57AC_C0DE;
+const CANARY_WORDS: usize = 8; // 64 bytes
+/// The rest of a new kernel stack is painted with this byte, so the deepest
+/// point it has reached can be read back (`stack_peak`).
+const PAINT: u8 = 0xA5;
 
 /// Size of the saved register frame that exception.s's save_all_regs pushes:
 /// the GPRs, SP_EL0, ELR and SPSR at 0..272, then q0-q31, FPCR and FPSR.
@@ -112,6 +126,62 @@ static COUNT: AtomicUsize = AtomicUsize::new(0);
 /// The task running init (0 until the kernel starts it). Its exit halts the
 /// system: nothing else supervises.
 static INIT_TASK: AtomicUsize = AtomicUsize::new(0);
+/// Each slot's generation, bumped on every install and never reset, so a
+/// (slot, generation) pair names one task for as long as the kernel runs
+/// (until 2^32 spawns into one slot).
+static GENERATIONS: [AtomicU32; MAX_TASKS] = [const { AtomicU32::new(0) }; MAX_TASKS];
+
+/// The task in slot `id` now (or last, if the slot is free).
+pub fn task_ref(id: usize) -> TaskRef {
+    let generation = GENERATIONS.get(id).map_or(0, |g| g.load(Ordering::SeqCst));
+    TaskRef { id: id as u16, generation }
+}
+
+/// Paint a new kernel stack and write its canary.
+fn prepare_stack(bottom: u64) {
+    unsafe {
+        core::ptr::write_bytes(bottom as *mut u8, PAINT, KERNEL_STACK_SIZE);
+        for i in 0..CANARY_WORDS {
+            *(bottom as *mut u64).add(i) = CANARY;
+        }
+    }
+}
+
+/// Panic if the outgoing task has overrun its kernel stack. Runs on every
+/// switch, with IRQs masked.
+fn check_canary(t: &[Task; MAX_TASKS], id: usize) {
+    let task = &t[id];
+    if task.state == State::Free || task.kernel_stack_pages == 0 {
+        return;
+    }
+    let intact = (0..CANARY_WORDS)
+        .all(|i| unsafe { *(task.kernel_stack_bottom as *const u64).add(i) } == CANARY);
+    if !intact {
+        panic!(
+            "kernel stack overflow: task {} ({})",
+            id,
+            crate::registry::name(id).as_str()
+        );
+    }
+}
+
+/// The deepest `task` has reached into its kernel stack, in bytes, or None
+/// for a free slot or the boot task (which runs on the firmware's stack).
+pub fn stack_peak(task: usize) -> Option<usize> {
+    let _irq = super::IrqGuard::mask();
+    let t = unsafe { &*tasks() };
+    let task = t.get(task)?;
+    if matches!(task.state, State::Free | State::Reserved) || task.kernel_stack_pages == 0 {
+        return None;
+    }
+    let painted = u64::from_ne_bytes([PAINT; 8]);
+    let words = KERNEL_STACK_SIZE / 8;
+    let base = task.kernel_stack_bottom as *const u64;
+    let untouched = (CANARY_WORDS..words)
+        .take_while(|&i| unsafe { *base.add(i) } == painted)
+        .count();
+    Some(KERNEL_STACK_SIZE - (CANARY_WORDS + untouched) * 8)
+}
 
 fn tasks() -> *mut [Task; MAX_TASKS] {
     TASKS.0.get()
@@ -162,13 +232,16 @@ fn release(id: usize) {
 /// records the task's name and service and moves its receive rights, so
 /// even a task that exits on its first tick is charged to the right service
 /// and gives its rights back to the right home.
-fn install(id: usize, task: Task, bind: impl FnOnce(usize)) {
+fn install(id: usize, task: Task, bind: impl FnOnce(TaskRef)) -> TaskRef {
     let _irq = super::IrqGuard::mask();
     let t = unsafe { &mut *tasks() };
     debug_assert!(t[id].state == State::Reserved);
     t[id] = task;
-    bind(id);
+    GENERATIONS[id].fetch_add(1, Ordering::SeqCst);
+    let task = task_ref(id);
+    bind(task);
     COUNT.store(task_count(), Ordering::SeqCst);
+    task
 }
 
 fn queue_pending_free(bottom: u64, pages: usize) {
@@ -248,6 +321,7 @@ extern "C" fn scheduler_tick_arm(stack_ptr: u64) -> u64 {
 pub fn switch_away(frame: u64) -> u64 {
     let t = unsafe { &mut *tasks() };
     let cur = CURRENT.load(Ordering::SeqCst);
+    check_canary(t, cur);
     if t[cur].state != State::Free {
         t[cur].sp = frame;
     }
@@ -279,6 +353,7 @@ pub fn hand_off(frame: u64, target: usize) -> u64 {
         return switch_away(frame);
     }
     let cur = CURRENT.load(Ordering::SeqCst);
+    check_canary(t, cur);
     if t[cur].state != State::Free {
         t[cur].sp = frame;
     }
@@ -400,7 +475,7 @@ pub fn init(ttbr0: u64) {
 ///
 /// Seeds a fake exception frame with SPSR_EL1 = EL1h + IRQs enabled. `bind`
 /// runs before the task can run (see `install`).
-pub fn spawn(entry: fn() -> !, bind: impl FnOnce(usize)) -> Result<usize, SpawnError> {
+pub fn spawn(entry: fn() -> !, bind: impl FnOnce(TaskRef)) -> Result<TaskRef, SpawnError> {
     let entry_addr = entry as *const () as u64;
     reap_pending_frees(0);
     let id = claim_slot().ok_or(SpawnError::NoSlot)?;
@@ -412,6 +487,7 @@ pub fn spawn(entry: fn() -> !, bind: impl FnOnce(usize)) -> Result<usize, SpawnE
     let stack_top = stack_bottom + KERNEL_STACK_SIZE as u64;
 
     let frame_base = stack_top - FRAME_SIZE;
+    prepare_stack(stack_bottom);
     unsafe {
         core::ptr::write_bytes(frame_base as *mut u8, 0, FRAME_SIZE as usize);
         let slots = frame_base as *mut u64;
@@ -420,7 +496,7 @@ pub fn spawn(entry: fn() -> !, bind: impl FnOnce(usize)) -> Result<usize, SpawnE
         *slots.add(33) = 0x0000_0005; // SPSR: EL1h, IRQs enabled
     }
 
-    install(
+    let task = install(
         id,
         Task {
             sp: frame_base,
@@ -440,7 +516,7 @@ pub fn spawn(entry: fn() -> !, bind: impl FnOnce(usize)) -> Result<usize, SpawnE
         stack_bottom,
         stack_top
     );
-    Ok(id)
+    Ok(task)
 }
 
 #[derive(Debug)]
@@ -462,15 +538,15 @@ pub fn spawn_el0(
     handles: HandleTable,
     arg0: u64,
     arg1: u64,
-    bind: impl FnOnce(usize),
-) -> Result<usize, SpawnError> {
+    bind: impl FnOnce(TaskRef),
+) -> Result<TaskRef, SpawnError> {
     reap_pending_frees(0);
     let id = claim_slot().ok_or(SpawnError::NoSlot)?;
     match build_el0(id, image, handles, arg0, arg1) {
         Ok((task, entry)) => {
-            install(id, task, bind);
+            let task = install(id, task, bind);
             serial_println!("    task {} el0 asid={} entry={:#x}", id, id, entry);
-            Ok(id)
+            Ok(task)
         }
         Err(err) => {
             release(id);
@@ -510,6 +586,7 @@ fn build_el0(
 
     // Seed a frame for restore_all_regs + eret into EL0.
     let frame_base = kernel_stack_top - FRAME_SIZE;
+    prepare_stack(kernel_stack_bottom);
     unsafe {
         core::ptr::write_bytes(frame_base as *mut u8, 0, FRAME_SIZE as usize);
         let slots = frame_base as *mut u64;
@@ -627,14 +704,20 @@ pub fn retire_current(reason: ExitReason) {
         if !slot.rights.contains(Rights::RECV) {
             continue;
         }
-        if let Some((home, home_slot)) = crate::ipc::receiver_exited(slot.channel, cur)
-            && home < MAX_TASKS
-            && home != cur
-            && let Some(home_slot) = t[home].handles.get_mut(Handle(home_slot))
-            && home_slot.channel == slot.channel
-        {
-            home_slot.rights = home_slot.rights.union(Rights::RECV);
-        }
+        // The channel names its receiver only once the home slot has
+        // taken the right back; otherwise it's left with no receiver.
+        crate::ipc::receiver_exited(slot.channel, cur, |home, home_slot| {
+            if home >= MAX_TASKS || home == cur {
+                return false;
+            }
+            match t[home].handles.get_mut(Handle(home_slot)) {
+                Some(home_slot) if home_slot.channel == slot.channel => {
+                    home_slot.rights = home_slot.rights.union(Rights::RECV);
+                    true
+                }
+                _ => false,
+            }
+        });
     }
     // Never keep running on a table that is about to be freed.
     activate(KERNEL_TTBR0.load(Ordering::SeqCst));
@@ -642,12 +725,14 @@ pub fn retire_current(reason: ExitReason) {
     queue_pending_free(t[cur].kernel_stack_bottom, t[cur].kernel_stack_pages);
     t[cur] = EMPTY_TASK;
     COUNT.store(task_count(), Ordering::SeqCst);
-    crate::registry::on_exit(cur, reason);
+    let task = task_ref(cur);
+    crate::registry::on_exit(task, reason);
     let _ = crate::ipc::send_as_kernel(
         crate::ipc::INIT_INBOX,
         &Message::new(freshos_abi::tag::TASK_EXITED)
             .with_data(0, cur as u64)
-            .with_data(1, reason as u64),
+            .with_data(1, reason as u64)
+            .with_data(2, task.generation as u64),
     );
 }
 

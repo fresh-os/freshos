@@ -6,8 +6,8 @@
 //! supervised services when the kernel reports they've exited.
 
 use freshos_rt::{
-    Error, ExitReason, Grant, Handle, Message, Rights, Startup, channel_create, entry, log,
-    recv_until, spawn, tag, time_ns,
+    Error, ExitReason, Grant, Handle, Message, Rights, Startup, TaskRef, channel_create, entry,
+    log, recv_until, spawn, tag, time_ns,
 };
 
 entry!(main);
@@ -17,7 +17,8 @@ const PING: usize = 0;
 const PONG: usize = 1;
 const SINK: usize = 2;
 const PROBE: usize = 3;
-const CHANNELS: usize = 4;
+const BUF: usize = 4;
+const CHANNELS: usize = 5;
 
 struct Service {
     name: &'static str,
@@ -56,11 +57,23 @@ const TABLE: &[Service] = &[
     Service { grants: &[(SINK, SEND), (PROBE, RECV)], optional: true, ..service("probe-chan", "PROBECHA.ELF") },
     Service { grants: &[(PING, RECV)], optional: true, ..service("probe-dup-recv", "PROBECHA.ELF") },
     Service { optional: true, ..service("probe-badelf", "BADELF.ELF") },
+    // A supervised receiver that exits after its first message, and a sender
+    // that sends more while it is down: they must wait for the restart.
+    Service {
+        grants: &[(BUF, RECV)],
+        arg: 1,
+        restart_after_ms: Some(300),
+        optional: true,
+        ..service("probe-buf-rx", "PROBECHA.ELF")
+    },
+    Service { grants: &[(BUF, SEND)], arg: 2, optional: true, ..service("probe-buf-tx", "PROBECHA.ELF") },
 ];
 
 #[derive(Clone, Copy)]
 struct Runtime {
-    task: Option<u32>,
+    /// The running instance, exactly: a task id alone may already belong to
+    /// a newer task by the time its exit notice arrives.
+    task: Option<TaskRef>,
     restart_at: Option<u64>,
 }
 
@@ -105,7 +118,10 @@ fn handle_message(message: &Message, state: &mut [Runtime], channels: &[Option<H
     match message.tag {
         // Only the kernel (sender 0) reports exits.
         tag::TASK_EXITED if message.sender == 0 => {
-            let task = message.payload[0] as u32;
+            let task = TaskRef {
+                id: message.payload[0] as u16,
+                generation: message.payload[2] as u32,
+            };
             let Some(index) = state.iter().position(|s| s.task == Some(task)) else { return };
             state[index].task = None;
             let reason = ExitReason::from_u64(message.payload[1]).map(|r| r.as_str()).unwrap_or("?");
@@ -132,7 +148,7 @@ fn handle_message(message: &Message, state: &mut [Runtime], channels: &[Option<H
     }
 }
 
-fn start_service(index: usize, channels: &[Option<Handle>; CHANNELS]) -> Option<u32> {
+fn start_service(index: usize, channels: &[Option<Handle>; CHANNELS]) -> Option<TaskRef> {
     let service = &TABLE[index];
     let mut grants = [Grant { handle: Handle(0), rights: Rights::NONE }; 16];
     for (grant, &(channel, rights)) in grants.iter_mut().zip(service.grants) {

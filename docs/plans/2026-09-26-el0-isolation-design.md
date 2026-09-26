@@ -159,9 +159,10 @@ crosses the kernel/user boundary. The kernel depends on it too: its IPC
 - `Message`: `u32` tag, `u16` sender, `u16` length, `[u64; 4]` payload,
   unchanged from today. The kernel always overwrites `sender`;
 - `Handle(u32)`, and the rights `SEND` and `RECV`;
-- `SpawnRequest` and `Grant`, for `init`;
+- `SpawnRequest` and `Grant`, for `init`, and `TaskRef { id, generation }`,
+  which names one task exactly (see section 5);
 - `ExitReason`: `Clean`, `Fault`, `Panic`;
-- system message tags, such as `TASK_EXITED { task, reason }` and
+- system message tags, such as `TASK_EXITED { task, reason, generation }` and
   `RESTART_REQUEST { name }`.
 
 **`freshos-rt`** (`lib/rt/`) is what a userbin links against:
@@ -226,8 +227,10 @@ Every task's address space
 - Each task gets a **64 KiB user stack** at the top of its window. The page
   below it stays unmapped as a **guard page**, so an overflow faults instead
   of overwriting data.
-- Each task gets its own **16 KiB kernel stack** for syscalls and
-  interrupts. On an exception from EL0 the CPU switches to it through
+- Each task gets its own **32 KiB kernel stack** for syscalls and
+  interrupts. Kernel stacks have no guard page yet; a canary at the bottom
+  of each is checked on every switch, and an overrun panics naming the
+  task. The MCP `tasks` view reports each task's deepest use. On an exception from EL0 the CPU switches to it through
   `SP_EL1` automatically. The kernel sets it with `mov sp` while running on
   it, because `msr SP_EL1` is undefined at EL1.
 
@@ -285,7 +288,7 @@ process may share its receive right.
 | 5 | `time_ns()` | Nanoseconds since boot | – |
 | 6 | `log(ptr, len)` | Write a log line | Text readable; capped at 256 bytes. The kernel prefixes the task's registered name. |
 | 7 | `channel_create()` | New channel; returns a handle with `SEND` and `RECV` | Caller is `init` |
-| 8 | `spawn(*request)` | Start a service by binary name, with the listed grants as its handles, in order: `SEND` is copied, `RECV` moves (see section 5). Returns the task id. | Caller is `init`; each grant names a handle `init` holds, with rights no wider than `init`'s; `RECV` still available |
+| 8 | `spawn(*request)` | Start a service by binary name, with the listed grants as its handles, in order: `SEND` is copied, `RECV` moves (see section 5). Returns the new task's `TaskRef`, packed into the result. | Caller is `init`; each grant names a handle `init` holds, with rights no wider than `init`'s; `RECV` still available |
 
 The old EL0 syscalls for the framebuffer, surfaces, trace and raw debug
 output are removed. The in-kernel built-ins read those directly.
@@ -373,8 +376,13 @@ asks for a second receiver on `PING`) are `optional`, so they only exist
 when a test stages them.
 
 **Supervision.** On every task exit or fault, the kernel sends
-`TASK_EXITED { task, reason }` on `init`'s inbox, as sender 0; `init`
-ignores a `TASK_EXITED` from anyone else. A notice is never lost to a full
+`TASK_EXITED { task, reason, generation }` on `init`'s inbox, as sender 0;
+`init` ignores a `TASK_EXITED` from anyone else. A task id alone isn't
+enough: a slot is reused as soon as its task exits, so a restart can take
+the id of a task whose notice `init` hasn't read yet. Each slot's
+generation is bumped on every spawn and never repeats, so `init` matches a
+notice against the exact `TaskRef` its `spawn` returned, and the registry
+charges an exit only to that task. A notice is never lost to a full
 inbox: it waits in a small kernel backlog and moves into the inbox, in
 order, as `init` makes room. `init` waits on its inbox using `recv` with a
 deadline set to its next pending restart, then restarts supervised services
@@ -385,7 +393,7 @@ prints why and halts: nothing is left to supervise.
 
 - The kernel keeps a **task registry**, because it witnesses every spawn and
   exit first-hand. For each task: name (from the spawn request), state,
-  exit count, last exit reason, and how many times a service of that name
+  generation, exit count, last exit reason, and how many times a service of that name
   has started. The MCP views, the flow view and the dashboard read the
   registry, so none of them trusts `init`'s account. It absorbs
   `task_names.rs`. `spawn` records the new task's name and service, and

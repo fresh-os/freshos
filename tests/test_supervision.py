@@ -1,3 +1,4 @@
+import re
 import struct
 import time
 
@@ -67,6 +68,72 @@ class SupervisionTest(FreshOSTestCase):
         self.wait_until(lambda: restarts() >= first + 5, timeout=60, message="five more restarts")
         after = frames_between_fault_runs()
         self.assertLessEqual(abs(before - after), 2, f"frames {before} -> {after}")
+
+    def test_queued_messages_survive_a_restart(self) -> None:
+        # probe-buf-rx exits after seq 1; probe-buf-tx sends 2 and 3 while it
+        # is down. They must wait in the channel for the restarted instance.
+        self.boot.wait_for_log(r"^\[probe-buf-rx\] \[buf\] got seq=3$", timeout=30)
+
+        def line(pattern: str) -> int:
+            regex = re.compile(pattern)
+            return next(i for i, text in enumerate(self.boot.lines) if regex.search(text))
+
+        sent = line(r"^\[probe-buf-tx\] \[buf\] sent seq=3$")
+        restarted = line(r"^\[init\] restarting probe-buf-rx$")
+        received = line(r"^\[probe-buf-rx\] \[buf\] got seq=2$")
+        self.assertLess(line(r"^\[probe-buf-rx\] \[buf\] got seq=1$"), sent)
+        self.assertLess(sent, restarted, "seq 3 was sent while the receiver was down")
+        self.assertLess(restarted, received, "seq 2 reached the restarted instance")
+        self.assertGreaterEqual(self.services()["probe-buf-rx"]["restarts"], 1)
+
+    def test_exits_are_charged_to_the_exact_task(self) -> None:
+        # A task id is reused as soon as its task exits; the generation tells
+        # the instances apart, so each service is charged only its own exits.
+        self.wait_until(
+            lambda: self.services().get("fault", {}).get("restarts", 0) >= 3
+            and self.services().get("pulse", {}).get("restarts", 0) >= 1,
+            timeout=40,
+            message="fault and pulse restarting",
+        )
+        tasks = self.boot.mcp().view("tasks")
+        self.assertTrue(all(task["generation"] >= 1 for task in tasks), tasks)
+        self.assertEqual(self.boot.find_logs(r"^\[init\] fault exited \(clean\)"), [])
+        self.assertEqual(self.boot.find_logs(r"^\[init\] pulse exited \(fault\)"), [])
+        services = self.services()
+        for name, reason in (("fault", "fault"), ("pulse", "clean")):
+            logged = len(self.boot.find_logs(rf"^\[init\] {name} exited \({reason}\)$"))
+            restarts = len(self.boot.find_logs(rf"^\[init\] restarting {name}$"))
+            with self.subTest(service=name):
+                # The kernel records an exit just before init hears of it,
+                # and a restart just after init asks, so allow one in flight.
+                self.assertIn(services[name]["exits"] - logged, (0, 1))
+                self.assertIn(restarts - services[name]["restarts"], (0, 1))
+
+    def test_every_instance_gets_a_new_generation(self) -> None:
+        # fault restarts into a freed slot, usually the one it just left.
+        seen: list[tuple[int, int]] = []
+
+        def fault_instances() -> int:
+            fault = self.services().get("fault", {})
+            instance = (fault.get("task"), fault.get("generation"))
+            if fault.get("running") and instance not in seen:
+                seen.append(instance)
+            return len(seen)
+
+        self.wait_until(lambda: fault_instances() >= 3, timeout=40, message="three fault instances")
+        for i, (task, generation) in enumerate(seen):
+            for earlier_task, earlier_generation in seen[:i]:
+                if task == earlier_task:
+                    self.assertGreater(generation, earlier_generation, seen)
+
+    def test_kernel_stack_peaks_are_reported(self) -> None:
+        tasks = {task["name"]: task for task in self.boot.mcp().view("tasks")}
+        for name in ("init", "mcp"):
+            with self.subTest(task=name):
+                peak = tasks[name]["stack_peak_bytes"]
+                self.assertIsNotNone(peak)
+                self.assertGreater(peak, 800)  # at least one saved frame
+                self.assertLess(peak, 32 * 1024)
 
 
 def elf_with_wx_segment() -> bytes:

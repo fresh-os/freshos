@@ -1,7 +1,10 @@
 #![no_std]
 #![no_main]
 
-use freshos_rt::{Error, Handle, Message, Startup, abi, entry, exit, log, send, spawn, try_recv};
+use freshos_rt::{
+    Error, Handle, Message, Startup, abi, entry, exit, log, recv, send, spawn, time_ns, try_recv,
+    yield_now,
+};
 
 entry!(main);
 
@@ -21,8 +24,51 @@ fn raw(nr: u64, a0: u64, a1: u64) -> Result<(), Error> {
     if ret < 0 { Err(Error::from_code(ret)) } else { Ok(()) }
 }
 
-/// Test-only: every way of using channels and pointers wrongly, each reported.
+/// Test-only. Chosen by its table argument: 0 = every way of using channels
+/// and pointers wrongly, each reported; 1 and 2 = the two halves of the
+/// buffering-across-a-restart check.
 fn main(start: Startup) -> ! {
+    match start.arg() {
+        1 => buffer_receiver(start.handle(0)),
+        2 => buffer_sender(start.handle(0)),
+        _ => misuse(start),
+    }
+}
+
+/// Log every message; exit after the first, so init restarts this service
+/// while the sender is still sending.
+fn buffer_receiver(channel: Handle) -> ! {
+    loop {
+        match recv(channel) {
+            Ok(message) => {
+                log!("[buf] got seq={}", message.payload[0]);
+                if message.payload[0] == 1 {
+                    exit()
+                }
+            }
+            Err(e) => log!("[buf] recv failed: {e:?}"),
+        }
+    }
+}
+
+/// Send seq 1, which ends the receiver's first run; then, while it is down
+/// (it restarts 300 ms later), send seq 2 and 3, and exit.
+fn buffer_sender(channel: Handle) -> ! {
+    let _ = send(channel, &Message::new(0).with_data(0, 1));
+    let resume = time_ns() + 100_000_000;
+    while time_ns() < resume {
+        yield_now();
+    }
+    for seq in 2..=3 {
+        match send(channel, &Message::new(0).with_data(0, seq)) {
+            Ok(()) => log!("[buf] sent seq={seq}"),
+            Err(e) => log!("[buf] send seq={seq} failed: {e:?}"),
+        }
+    }
+    exit()
+}
+
+fn misuse(start: Startup) -> ! {
     let sink = start.handle(0);
     let own = start.handle(1);
     // An untyped message (tag 0), so the trace never shows it as a PING.

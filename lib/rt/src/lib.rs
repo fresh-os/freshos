@@ -4,7 +4,7 @@
 
 mod syscall;
 
-pub use freshos_abi::{self as abi, Error, ExitReason, Grant, Handle, Message, Rights, tag};
+pub use freshos_abi::{self as abi, Error, ExitReason, Grant, Handle, Message, Rights, TaskRef, tag};
 use freshos_abi::{SpawnRequest, sys};
 use syscall::{check, svc};
 
@@ -104,7 +104,7 @@ pub fn channel_create() -> Result<Handle, Error> {
 
 /// init only: start `binary` (an ESP file name, or "builtin:<name>") as the
 /// service `name`, with `grants` as its handles 0.., and `arg` for its `main`.
-pub fn spawn(name: &str, binary: &str, grants: &[Grant], arg: u64) -> Result<u32, Error> {
+pub fn spawn(name: &str, binary: &str, grants: &[Grant], arg: u64) -> Result<TaskRef, Error> {
     let request = SpawnRequest {
         name_ptr: name.as_ptr() as u64,
         name_len: name.len() as u64,
@@ -114,7 +114,7 @@ pub fn spawn(name: &str, binary: &str, grants: &[Grant], arg: u64) -> Result<u32
         grants_len: grants.len() as u64,
         arg,
     };
-    check(svc(sys::SPAWN, &request as *const SpawnRequest as u64, 0, 0)).map(|id| id as u32)
+    check(svc(sys::SPAWN, &request as *const SpawnRequest as u64, 0, 0)).map(TaskRef::unpack)
 }
 
 /// A fixed buffer for `log!`; longer text is cut at `MAX_LOG` bytes.

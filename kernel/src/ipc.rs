@@ -377,27 +377,22 @@ pub fn receiver(channel_id: u32) -> Option<usize> {
         .and_then(|ch| (ch.receiver != 0xFFFF).then_some(ch.receiver as usize))
 }
 
-/// `task`, the receiver of `channel_id`, exited. Queued messages stay; the
-/// right goes back to where it came from. Returns that home (task, slot), or
-/// None if the right had no home, in which case the channel has no receiver.
-pub fn receiver_exited(channel_id: u32, task: usize) -> Option<(usize, u32)> {
-    let ch = channel_mut(channel_id).ok()?;
+/// `task`, the receiver of `channel_id`, exited. Queued messages stay. If
+/// the right was moved here by spawn, `give_back(home_task, home_slot)`
+/// returns it to that slot, and only if it confirms does the home become the
+/// receiver again; otherwise the channel is left with no receiver.
+pub fn receiver_exited(channel_id: u32, task: usize, give_back: impl FnOnce(usize, u32) -> bool) {
+    let Ok(ch) = channel_mut(channel_id) else { return };
     if ch.receiver != task as u16 {
-        return None;
+        return;
     }
     if ch.waiter == Some(task) {
         ch.waiter = None;
     }
-    match ch.recv_home.take() {
-        Some((home_task, home_slot)) => {
-            ch.receiver = home_task;
-            Some((home_task as usize, home_slot))
-        }
-        None => {
-            ch.receiver = 0xFFFF;
-            None
-        }
-    }
+    ch.receiver = match ch.recv_home.take() {
+        Some((home_task, home_slot)) if give_back(home_task as usize, home_slot) => home_task,
+        _ => 0xFFFF,
+    };
 }
 
 fn channel_mut(channel_id: u32) -> Result<&'static mut Channel, Error> {

@@ -166,9 +166,9 @@ fn spawn(request_ptr: u64) -> Outcome {
                 return Err(Error::Invalid);
             }
             let entry = crate::arm_tasks::builtin(builtin.as_bytes()).ok_or(Error::NotFound)?;
-            let id = context::spawn(entry, |id| crate::registry::on_spawn(id, name))
+            let task = context::spawn(entry, |task| crate::registry::on_spawn(task, name))
                 .map_err(spawn_error)?;
-            return Ok(Outcome::Return(id as i64));
+            return Ok(Outcome::Return(task.pack() as i64));
         }
 
         let image = crate::boot_images::find(binary).ok_or(Error::NotFound)?;
@@ -189,6 +189,10 @@ fn spawn(request_ptr: u64) -> Outcome {
                 return Err(Error::Invalid);
             }
             let slot = *init_handles.get_mut(grant.handle).ok_or(Error::NoSuchHandle)?;
+            // init's inbox is how the kernel reaches it; it can't give that away.
+            if grant.rights.contains(Rights::RECV) && slot.channel == crate::ipc::INIT_INBOX {
+                return Err(Error::NotPermitted);
+            }
             if grant.rights.contains(Rights::RECV) {
                 // One receiver per channel: not twice in one request, and not
                 // while an earlier child still holds it.
@@ -213,25 +217,26 @@ fn spawn(request_ptr: u64) -> Outcome {
         // `bind` has run inside the install. It moves the receive rights and
         // names the task before the task can run, so even an instant exit
         // returns them and is charged to this service.
-        let bind = |id: usize| {
+        let bind = |task: freshos_abi::TaskRef| {
             for grant in grants.iter().filter(|g| g.rights.contains(Rights::RECV)) {
                 if let Some(slot) = context::handles_mut(init).get_mut(grant.handle) {
                     slot.rights = slot.rights.without(Rights::RECV);
+                    let id = task.id as usize;
                     crate::ipc::set_receiver_with_home(slot.channel, id, init, grant.handle.0);
                 }
             }
-            crate::registry::on_spawn(id, name);
+            crate::registry::on_spawn(task, name);
         };
         crate::arch::interrupt_enable();
         let spawned = context::spawn_el0(image, child, count as u64, request.arg, bind);
         crate::arch::interrupt_disable();
-        let id = spawned.map_err(|e| {
+        let task = spawned.map_err(|e| {
             if let context::SpawnError::BadImage(reason) = e {
                 serial_println!("refused {}: {}", binary, reason);
             }
             spawn_error(e)
         })?;
-        Ok(Outcome::Return(id as i64))
+        Ok(Outcome::Return(task.pack() as i64))
     };
     run().unwrap_or_else(err)
 }

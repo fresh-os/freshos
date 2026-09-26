@@ -4,7 +4,7 @@
 /// so none of them has to trust init's account.
 use core::cell::UnsafeCell;
 
-use freshos_abi::{ExitReason, NAME_LEN};
+use freshos_abi::{ExitReason, NAME_LEN, TaskRef};
 
 use crate::arch::IrqGuard;
 use crate::arch::context::MAX_TASKS;
@@ -40,6 +40,8 @@ impl Name {
 pub struct ServiceRecord {
     pub name: Name,
     pub task: Option<u16>,
+    /// The generation of the service's current (or last) task.
+    pub generation: u32,
     pub starts: u64,
     pub exits: u64,
     pub last_exit: Option<ExitReason>,
@@ -65,8 +67,9 @@ fn with<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
 }
 
 /// A task started as the service `name`.
-pub fn on_spawn(task: usize, name: &[u8]) {
+pub fn on_spawn(task_ref: TaskRef, name: &[u8]) {
     let name = Name::new(name);
+    let task = task_ref.id as usize;
     with(|r| {
         if task < MAX_TASKS {
             r.task_names[task] = name;
@@ -80,21 +83,25 @@ pub fn on_spawn(task: usize, name: &[u8]) {
             let record = r.services[index].get_or_insert(ServiceRecord {
                 name,
                 task: None,
+                generation: 0,
                 starts: 0,
                 exits: 0,
                 last_exit: None,
             });
-            record.task = Some(task as u16);
+            record.task = Some(task_ref.id);
+            record.generation = task_ref.generation;
             record.starts += 1;
         }
     });
 }
 
-/// A task ended.
-pub fn on_exit(task: usize, reason: ExitReason) {
+/// A task ended. Only the record of that exact task (id and generation)
+/// is charged with the exit.
+pub fn on_exit(task_ref: TaskRef, reason: ExitReason) {
+    let task = task_ref.id as usize;
     with(|r| {
         for record in r.services.iter_mut().flatten() {
-            if record.task == Some(task as u16) {
+            if record.task == Some(task_ref.id) && record.generation == task_ref.generation {
                 record.task = None;
                 record.exits += 1;
                 record.last_exit = Some(reason);

@@ -70,7 +70,8 @@ pub mod tag {
     pub const MOUSE: u32 = 12;
     pub const KEY_DOWN: u32 = 20;
     pub const KEY_UP: u32 = 21;
-    /// Kernel → init: payload[0] = task id, payload[1] = `ExitReason`.
+    /// Kernel → init: payload[0] = task id, payload[1] = `ExitReason`,
+    /// payload[2] = the task's generation (see `TaskRef`).
     pub const TASK_EXITED: u32 = 100;
     /// Anyone with SEND on init's inbox → init: the service name, packed by `with_name`.
     pub const RESTART_REQUEST: u32 = 101;
@@ -151,6 +152,28 @@ impl Rights {
     }
     pub const fn without(self, other: Rights) -> Rights {
         Rights(self.0 & !other.0)
+    }
+}
+
+/// A task, exactly: its slot id and that slot's generation. A slot is reused
+/// as soon as its task exits, but its generation is bumped on every spawn
+/// into it and never repeats while the kernel runs, so a `TaskRef` never
+/// names two tasks. `spawn` returns one, packed by `pack` into its
+/// (non-negative) result; `TASK_EXITED` carries the same two numbers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TaskRef {
+    pub id: u16,
+    pub generation: u32,
+}
+
+impl TaskRef {
+    /// Bits 0..16 are the id, bits 16..48 the generation.
+    pub const fn pack(self) -> u64 {
+        (self.generation as u64) << 16 | self.id as u64
+    }
+
+    pub const fn unpack(value: u64) -> TaskRef {
+        TaskRef { id: value as u16, generation: (value >> 16) as u32 }
     }
 }
 
