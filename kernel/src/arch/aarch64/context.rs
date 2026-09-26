@@ -187,47 +187,54 @@ fn reap_pending_frees(current_stack_ptr: u64) {
 #[unsafe(no_mangle)]
 extern "C" fn scheduler_tick_arm(stack_ptr: u64) -> u64 {
     reap_pending_frees(stack_ptr);
-
-    // Acknowledge the GIC interrupt and rearm the timer
     let intid = gic::acknowledge();
     timer::handle_irq();
     gic::end_of_interrupt(intid);
+    switch_away(stack_ptr)
+}
 
+/// Save the current task's frame and pick the next ready task, round-robin.
+/// Returns the frame to restore. Runs with IRQs masked (exception context).
+pub fn switch_away(frame: u64) -> u64 {
     let t = unsafe { &mut *tasks() };
     let cur = CURRENT.load(Ordering::SeqCst);
-
-    // Save outgoing task
     if t[cur].state != State::Free {
-        t[cur].sp = stack_ptr;
+        t[cur].sp = frame;
     }
     if t[cur].state == State::Running {
         t[cur].state = State::Ready;
     }
+    let next = (1..=MAX_TASKS)
+        .map(|step| (cur + step) % MAX_TASKS)
+        .find(|&candidate| t[candidate].state == State::Ready)
+        .unwrap_or(0);
+    run(t, next)
+}
 
-    // Round-robin: find next Ready task
-    let mut next = cur;
-    let mut found = false;
-    for step in 1..=MAX_TASKS {
-        let candidate = (cur + step) % MAX_TASKS;
-        if t[candidate].state == State::Ready {
-            next = candidate;
-            found = true;
-            break;
-        }
+/// Run `target` next (direct hand-off). The current task stays ready.
+pub fn hand_off(frame: u64, target: usize) -> u64 {
+    let t = unsafe { &mut *tasks() };
+    let cur = CURRENT.load(Ordering::SeqCst);
+    if t[cur].state != State::Free {
+        t[cur].sp = frame;
     }
-    if !found && t[cur].state == State::Ready {
-        next = cur;
-        found = true;
+    if t[cur].state == State::Running {
+        t[cur].state = State::Ready;
     }
-    if !found {
-        next = 0;
-    }
+    run(t, target)
+}
 
+fn run(t: &mut [Task; MAX_TASKS], next: usize) -> u64 {
     t[next].state = State::Running;
     CURRENT.store(next, Ordering::SeqCst);
     activate(t[next].ttbr0);
-
     t[next].sp
+}
+
+/// The current task's address space (None for kernel tasks).
+pub fn current_space() -> Option<&'static AddressSpace> {
+    let t = unsafe { &*tasks() };
+    t[CURRENT.load(Ordering::SeqCst)].space.as_ref()
 }
 
 /// Initialise the scheduler with task 0 (the boot/idle task).

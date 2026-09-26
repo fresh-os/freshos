@@ -8,13 +8,6 @@ use core::fmt::{self, Write};
 
 pub struct Serial;
 
-impl Serial {
-    /// Public single-byte write for the debug syscall.
-    pub fn write_byte_raw(byte: u8) {
-        crate::arch::serial_write_byte(byte);
-    }
-}
-
 impl Write for Serial {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for &byte in s.as_bytes() {

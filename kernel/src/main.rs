@@ -30,6 +30,8 @@ mod init_abi;
 mod mcp;
 #[cfg(target_arch = "aarch64")]
 mod service_abi;
+#[cfg(target_arch = "aarch64")]
+mod syscalls;
 
 use frame_alloc::MemRegion;
 use framebuffer::{Color, Framebuffer};
@@ -335,24 +337,6 @@ fn main() -> Status {
             }
             Err(err) => {
                 serial_println!("  Pong ELF load failed: {}", err);
-            }
-        }
-    }
-
-    if let Some(bytes) = boot_images::find("PULSE.ELF") {
-        match elf::load_image(bytes) {
-            Ok(image) => {
-                arch::paging::make_executable(image.base, image.size as u64);
-                service_abi::register_external_pulse(image.entry);
-                serial_println!(
-                    "  Pulse ELF loaded: base={:#x} size={} entry={:#x}",
-                    image.base,
-                    image.size,
-                    image.entry
-                );
-            }
-            Err(err) => {
-                serial_println!("  Pulse ELF load failed: {}", err);
             }
         }
     }

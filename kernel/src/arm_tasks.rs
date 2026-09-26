@@ -2219,20 +2219,6 @@ pub fn ipc_probe_pong_el1() -> ! {
     }
 }
 
-pub fn supervised_pulse_el1() -> ! {
-    crate::serial::serial_println!("[pulse] builtin start");
-
-    for beat in 1..=3u64 {
-        for _ in 0..500 {
-            yield_now();
-        }
-        crate::serial::serial_println!("[pulse] builtin beat {}", beat);
-    }
-
-    crate::serial::serial_println!("[pulse] builtin exit");
-    crate::arch::context::terminate_current_with_reason(crate::init_abi::SERVICE_EXIT_CLEAN)
-}
-
 // ============================================================================
 // Keyboard — polls PL011 UART, sends key events via IPC
 // ============================================================================

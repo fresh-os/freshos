@@ -105,6 +105,9 @@ version = "0.1.0"
 [[package]]
 name = "freshos-fault"
 version = "0.1.0"
+dependencies = [
+ "freshos-rt",
+]
 
 [[package]]
 name = "freshos-init"
@@ -125,8 +128,25 @@ name = "freshos-pong"
 version = "0.1.0"
 
 [[package]]
+name = "freshos-probe-bad"
+version = "0.1.0"
+dependencies = [
+ "freshos-rt",
+]
+
+[[package]]
 name = "freshos-pulse"
 version = "0.1.0"
+dependencies = [
+ "freshos-rt",
+]
+
+[[package]]
+name = "freshos-rt"
+version = "0.1.0"
+dependencies = [
+ "freshos-abi",
+]
 
 [[package]]
 name = "getrandom"

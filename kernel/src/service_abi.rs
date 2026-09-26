@@ -24,7 +24,6 @@ pub struct ServiceApi {
 }
 
 static EXTERNAL_PONG_ENTRY: AtomicU64 = AtomicU64::new(0);
-static EXTERNAL_PULSE_ENTRY: AtomicU64 = AtomicU64::new(0);
 
 extern "C" fn service_log(ptr: *const u8, len: usize) {
     if ptr.is_null() || len == 0 {
@@ -107,17 +106,6 @@ pub fn register_external_pong(entry: u64) {
 
 pub fn external_pong_entry() -> Option<u64> {
     match EXTERNAL_PONG_ENTRY.load(Ordering::SeqCst) {
-        0 => None,
-        entry => Some(entry),
-    }
-}
-
-pub fn register_external_pulse(entry: u64) {
-    EXTERNAL_PULSE_ENTRY.store(entry, Ordering::SeqCst);
-}
-
-pub fn external_pulse_entry() -> Option<u64> {
-    match EXTERNAL_PULSE_ENTRY.load(Ordering::SeqCst) {
         0 => None,
         entry => Some(entry),
     }

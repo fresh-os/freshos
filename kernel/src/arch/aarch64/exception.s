@@ -205,7 +205,7 @@ lower_irq_entry:
 // SVC ABI:
 //   x8  = syscall number
 //   x0-x5 = arguments
-//   x0  = return value (written back before eret)
+//   x0  = return value (written into the saved frame)
 // ===================================================================
 
 lower_sync_entry:
@@ -230,20 +230,12 @@ lower_sync_entry:
     b       .
 
 svc_dispatch:
-    // Reload the saved x8 (syscall number) and x0-x3 (args) from the stack.
-    // save_all_regs layout: x0 at [sp+0], x8 at [sp+64]
-    ldr     x0, [sp, #64]       // arg0 = saved x8 (syscall number)
-    ldr     x1, [sp, #0]        // arg1 = saved x0 (first arg)
-    ldr     x2, [sp, #8]        // arg2 = saved x1
-    ldr     x3, [sp, #16]       // arg3 = saved x2
-    ldr     x4, [sp, #24]       // arg4 = saved x3
-    ldr     x5, [sp, #32]       // arg5 = saved x4
-
-    bl      syscall_dispatch_arm // returns result in x0
-
-    // Write return value into the saved x0 slot so restore_all_regs
-    // puts it back in x0 for the user task.
-    str     x0, [sp, #0]
+    // Hand Rust the whole saved frame: it reads x8 and x0-x5 from it, writes
+    // the result into the saved x0, and returns the frame to resume, which
+    // may belong to another task (blocking, yielding, exiting, hand-off).
+    mov     x0, sp
+    bl      syscall_entry_arm
+    mov     sp, x0
 
     restore_all_regs
     eret

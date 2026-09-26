@@ -35,7 +35,7 @@ RUN_ARM = REPO / "run-arm.sh"
 
 # Userbins that exist only for tests. They are built and staged for test boots
 # and listed as optional in init's service table, so normal boots never run them.
-TEST_ELFS: tuple[str, ...] = ()
+TEST_ELFS: tuple[str, ...] = ("probe-bad",)
 
 ANSI = re.compile(r"\x1b\[[0-9;?=]*[A-Za-z]|\x1b[()][A-Za-z0-9]")
 

@@ -13,6 +13,10 @@ pub const SERVICE_PONG: u64 = 6;
 pub const SERVICE_PULSE: u64 = 7;
 pub const SERVICE_FAULT: u64 = 8;
 pub const SERVICE_MCP: u64 = 9;
+pub const SERVICE_PROBE_BAD_KERNEL: u64 = 10;
+pub const SERVICE_PROBE_BAD_UNMAPPED: u64 = 11;
+pub const SERVICE_PROBE_BAD_CODE: u64 = 12;
+pub const SERVICE_PROBE_BAD_STACK: u64 = 13;
 
 pub const SERVICE_FLAG_AUTOSTART: u64 = 1 << 0;
 pub const SERVICE_FLAG_SUPERVISED: u64 = 1 << 1;
@@ -23,7 +27,7 @@ pub const SERVICE_EXIT_NONE: u64 = 0;
 pub const SERVICE_EXIT_CLEAN: u64 = 1;
 pub const SERVICE_EXIT_FAULT: u64 = 2;
 
-const SERVICE_COUNT: usize = 9;
+const SERVICE_COUNT: usize = 13;
 const SERVICE_NAME_BYTES: usize = 16;
 
 #[repr(C)]
@@ -69,65 +73,89 @@ struct ServiceDefinition {
     name: &'static str,
     flags: u64,
     restart_period_ticks: u64,
-    spawn: fn() -> usize,
+    /// Start the service; `None` if it couldn't be started.
+    spawn: fn() -> Option<usize>,
 }
 
-fn spawn_kbd_service() -> usize {
-    arch::context::spawn(crate::arm_tasks::keyboard_el1)
+fn spawn_kbd_service() -> Option<usize> {
+    Some(arch::context::spawn(crate::arm_tasks::keyboard_el1))
 }
 
-fn spawn_comp_service() -> usize {
-    arch::context::spawn(crate::arm_tasks::compositor_el1)
+fn spawn_comp_service() -> Option<usize> {
+    Some(arch::context::spawn(crate::arm_tasks::compositor_el1))
 }
 
-fn spawn_shell_service() -> usize {
-    arch::context::spawn(crate::arm_tasks::shell_el1)
+fn spawn_shell_service() -> Option<usize> {
+    Some(arch::context::spawn(crate::arm_tasks::shell_el1))
 }
 
-fn spawn_dash_service() -> usize {
-    arch::context::spawn(crate::arm_tasks::dashboard_el1)
+fn spawn_dash_service() -> Option<usize> {
+    Some(arch::context::spawn(crate::arm_tasks::dashboard_el1))
 }
 
-fn spawn_ping_service() -> usize {
-    arch::context::spawn(crate::arm_tasks::ipc_probe_ping_el1)
+fn spawn_ping_service() -> Option<usize> {
+    Some(arch::context::spawn(crate::arm_tasks::ipc_probe_ping_el1))
 }
 
-fn spawn_pong_service() -> usize {
+fn spawn_pong_service() -> Option<usize> {
     if let Some(entry) = crate::service_abi::external_pong_entry() {
-        arch::context::spawn_with_arg(entry, crate::service_abi::probe_api_ptr() as u64)
+        Some(arch::context::spawn_with_arg(entry, crate::service_abi::probe_api_ptr() as u64))
     } else {
-        arch::context::spawn(crate::arm_tasks::ipc_probe_pong_el1)
+        Some(arch::context::spawn(crate::arm_tasks::ipc_probe_pong_el1))
     }
 }
 
-fn spawn_pulse_service() -> usize {
-    if let Some(entry) = crate::service_abi::external_pulse_entry() {
-        arch::context::spawn_with_arg(entry, crate::service_abi::probe_api_ptr() as u64)
-    } else {
-        arch::context::spawn(crate::arm_tasks::supervised_pulse_el1)
-    }
+fn spawn_mcp_service() -> Option<usize> {
+    Some(arch::context::spawn(crate::mcp::bridge_el1))
 }
 
-fn spawn_mcp_service() -> usize {
-    arch::context::spawn(crate::mcp::bridge_el1)
-}
-
-fn spawn_fault_service() -> usize {
-    let Some(image) = crate::boot_images::find("FAULT.ELF") else {
-        serial_println!("[init] FAULT.ELF missing");
-        return 0;
-    };
-    match arch::context::spawn_el0(image, 0, 0) {
-        Ok(id) => id,
+/// Start `binary` from the ESP at EL0, with `arg` for its `main`. A missing
+/// file is silent (the probes are only staged for test boots).
+fn spawn_image(binary: &str, arg: u64) -> Option<usize> {
+    let image = crate::boot_images::find(binary)?;
+    match arch::context::spawn_el0(image, 0, arg) {
+        Ok(id) => Some(id),
         Err(arch::context::SpawnError::BadImage(reason)) => {
-            serial_println!("[init] cannot start fault: bad image: {}", reason);
-            0
+            serial_println!("[init] cannot start {}: bad image: {}", binary, reason);
+            None
         }
         Err(err) => {
-            serial_println!("[init] cannot start fault: {:?}", err);
-            0
+            serial_println!("[init] cannot start {}: {:?}", binary, err);
+            None
         }
     }
+}
+
+fn spawn_fault_service() -> Option<usize> {
+    if crate::boot_images::find("FAULT.ELF").is_none() {
+        serial_println!("[init] FAULT.ELF missing");
+    }
+    spawn_image("FAULT.ELF", 0)
+}
+
+fn spawn_pulse_service() -> Option<usize> {
+    spawn_image("PULSE.ELF", 0)
+}
+
+// Test-only (PROBEBAD.ELF is staged only by the test harness). Each attempts
+// one forbidden access and must end in a contained fault. 0x4000_0000 is the
+// start of RAM on QEMU virt (the kernel heap); the kernel's map of RAM, which
+// also covers every other task's frames, is EL1-only, so that one probe
+// stands for both "kernel memory" and "another service's frames".
+fn spawn_probe_bad_kernel() -> Option<usize> {
+    spawn_image("PROBEBAD.ELF", 0x4000_0000)
+}
+
+fn spawn_probe_bad_unmapped() -> Option<usize> {
+    spawn_image("PROBEBAD.ELF", 0x4_2000_0000)
+}
+
+fn spawn_probe_bad_code() -> Option<usize> {
+    spawn_image("PROBEBAD.ELF", 0)
+}
+
+fn spawn_probe_bad_stack() -> Option<usize> {
+    spawn_image("PROBEBAD.ELF", 1)
 }
 
 static SERVICES: [ServiceDefinition; SERVICE_COUNT] = [
@@ -194,6 +222,34 @@ static SERVICES: [ServiceDefinition; SERVICE_COUNT] = [
         restart_period_ticks: 0,
         spawn: spawn_mcp_service,
     },
+    ServiceDefinition {
+        id: SERVICE_PROBE_BAD_KERNEL,
+        name: "probe-bad-kernel",
+        flags: SERVICE_FLAG_AUTOSTART,
+        restart_period_ticks: 0,
+        spawn: spawn_probe_bad_kernel,
+    },
+    ServiceDefinition {
+        id: SERVICE_PROBE_BAD_UNMAPPED,
+        name: "probe-bad-unmapped",
+        flags: SERVICE_FLAG_AUTOSTART,
+        restart_period_ticks: 0,
+        spawn: spawn_probe_bad_unmapped,
+    },
+    ServiceDefinition {
+        id: SERVICE_PROBE_BAD_CODE,
+        name: "probe-bad-code",
+        flags: SERVICE_FLAG_AUTOSTART,
+        restart_period_ticks: 0,
+        spawn: spawn_probe_bad_code,
+    },
+    ServiceDefinition {
+        id: SERVICE_PROBE_BAD_STACK,
+        name: "probe-bad-stack",
+        flags: SERVICE_FLAG_AUTOSTART,
+        restart_period_ticks: 0,
+        spawn: spawn_probe_bad_stack,
+    },
 ];
 
 static STARTED_SERVICES: AtomicU64 = AtomicU64::new(0);
@@ -218,11 +274,7 @@ fn service_bit(service_idx: usize) -> u64 {
 }
 
 pub(crate) fn exit_reason_name(reason: u64) -> &'static str {
-    match reason {
-        SERVICE_EXIT_CLEAN => "clean",
-        SERVICE_EXIT_FAULT => "fault",
-        _ => "unknown",
-    }
+    freshos_abi::ExitReason::from_u64(reason).map_or("unknown", freshos_abi::ExitReason::as_str)
 }
 
 fn remember_service_task(service_idx: usize, service_id: u64, task_id: usize) {
@@ -271,20 +323,23 @@ extern "C" fn init_spawn_service(service_id: u64) -> i64 {
     let definition = &SERVICES[service_idx];
     let had_previous_exit =
         SERVICE_LAST_EXITS[service_idx].load(Ordering::SeqCst) != SERVICE_EXIT_NONE;
-    let task_id = (definition.spawn)();
-    if task_id == 0 {
-        // Spawn failed (task 0 is the idle task, never a service). Leave the
-        // service stopped so a later request can try again.
+    // Record the task before it can run. With IRQs masked, no tick can start
+    // it until its name and its service are both registered, so its first
+    // log line carries its own name (never the slot's previous occupant's),
+    // and an exit, however early, is charged to the right service.
+    let irq = arch::IrqGuard::mask();
+    let Some(task_id) = (definition.spawn)() else {
+        drop(irq);
+        // Leave the service stopped so a later request can try again.
         STARTED_SERVICES.fetch_and(!bit, Ordering::SeqCst);
         return -1;
-    }
+    };
     crate::task_names::register(task_id, definition.name);
-
     if had_previous_exit {
         SERVICE_RESTARTS[service_idx].fetch_add(1, Ordering::SeqCst);
     }
-
     remember_service_task(service_idx, service_id, task_id);
+    drop(irq);
     task_id as i64
 }
 

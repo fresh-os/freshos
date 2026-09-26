@@ -1,30 +1,16 @@
-/// aarch64 syscall dispatch — handles SVC #0 from EL0.
+/// aarch64 syscall entry: SVC #0 from EL0.
 ///
-/// Syscall ABI (AAPCS64-inspired):
-///   x8  = syscall number
-///   x0-x5 = arguments
-///   x0  = return value
+/// Syscall ABI: x8 = syscall number, x0-x5 = arguments, x0 = return value.
+/// exception.s saves the whole frame and passes it here; the syscalls
+/// themselves live in `crate::syscalls`, which validates every argument.
 ///
-/// Called from exception.s's lower_sync_entry after saving all registers.
-use crate::ipc;
-use crate::serial::serial_println;
-
+/// This module also holds the framebuffer and surface descriptions that the
+/// in-kernel built-ins read.
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-// Syscall numbers (must match userspace wrappers)
-pub const SYS_SEND: u64 = 0;
-pub const SYS_RECV: u64 = 1;
-pub const SYS_YIELD: u64 = 2;
-pub const SYS_EXIT: u64 = 3;
-pub const SYS_FBINFO: u64 = 4;
-pub const SYS_TIME: u64 = 5;
-pub const SYS_TRACE: u64 = 6;
-pub const SYS_SURFACE_INFO: u64 = 7;
-pub const SYS_DEBUG: u64 = 99;
-
 // ---------------------------------------------------------------------------
-// Framebuffer info — set by kernel at boot, read by SYS_FBINFO
+// Framebuffer info — set by the kernel at boot, read by the built-ins
 // ---------------------------------------------------------------------------
 
 #[repr(C)]
@@ -50,15 +36,6 @@ pub static FB_INFO_PTR: FbInfoCell = FbInfoCell(UnsafeCell::new(FbInfo {
 
 pub fn set_fb_info(info: FbInfo) {
     unsafe { *FB_INFO_PTR.0.get() = info };
-}
-
-pub fn fb_address() -> u64 {
-    unsafe { (*FB_INFO_PTR.0.get()).address }
-}
-
-pub fn fb_size() -> u64 {
-    let info = unsafe { &*FB_INFO_PTR.0.get() };
-    info.stride as u64 * info.height as u64 * 4
 }
 
 // ---------------------------------------------------------------------------
@@ -97,77 +74,32 @@ pub fn add_surface(info: SurfaceInfo) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// Dispatch — called from exception.s
+// Entry — called from exception.s
 // ---------------------------------------------------------------------------
 
+/// Syscall entry from exception.s. `frame` is the task's saved register frame
+/// (save_all_regs layout: x0..x30 at 8*n, SP_EL0 at 248, ELR at 256, SPSR at 264).
+/// Returns the frame to restore.
 #[unsafe(no_mangle)]
-extern "C" fn syscall_dispatch_arm(
-    nr: u64,
-    arg0: u64,
-    arg1: u64,
-    _arg2: u64,
-    _arg3: u64,
-    _arg4: u64,
-) -> i64 {
-    match nr {
-        SYS_SEND => sys_send(arg0 as u32, arg1),
-        SYS_RECV => sys_recv(arg0 as u32, arg1),
-        SYS_YIELD => {
-            // Enable interrupts and wait — timer will preempt us
-            super::interrupt_enable();
-            super::halt();
-            0
+extern "C" fn syscall_entry_arm(frame: u64) -> u64 {
+    use crate::syscalls::Outcome;
+    let regs = frame as *mut u64;
+    let (nr, args) = unsafe {
+        (*regs.add(8), [*regs.add(0), *regs.add(1), *regs.add(2), *regs.add(3), *regs.add(4), *regs.add(5)])
+    };
+    match crate::syscalls::dispatch(nr, args) {
+        Outcome::Return(value) => {
+            unsafe { *regs = value as u64 };
+            frame
         }
-        SYS_EXIT => {
-            serial_println!("task {} exited", super::context::current_task());
-            super::context::terminate_current_with_reason(crate::init_abi::SERVICE_EXIT_CLEAN)
+        Outcome::Yield => {
+            unsafe { *regs = 0 };
+            super::context::switch_away(frame)
         }
-        SYS_FBINFO => {
-            let buf = arg0 as *mut FbInfo;
-            unsafe { *buf = *FB_INFO_PTR.0.get() };
-            0
+        Outcome::Exited | Outcome::Blocked => super::context::switch_away(frame),
+        Outcome::HandOff(task) => {
+            unsafe { *regs = 0 };
+            super::context::hand_off(frame, task)
         }
-        SYS_TIME => super::timer::time_ns() as i64,
-        SYS_SURFACE_INFO => {
-            let idx = arg0 as usize;
-            if idx >= SURFACE_COUNT.load(Ordering::SeqCst) {
-                return -1;
-            }
-            let buf = arg1 as *mut SurfaceInfo;
-            unsafe { *buf = (*SURFACES_PTR.0.get())[idx] };
-            0
-        }
-        SYS_TRACE => {
-            let buf = arg0 as *mut ipc::TraceEntry;
-            let max = arg1 as usize;
-            let slice = unsafe { core::slice::from_raw_parts_mut(buf, max) };
-            ipc::trace_read(slice, max) as i64
-        }
-        SYS_DEBUG => {
-            crate::serial::Serial::write_byte_raw(arg0 as u8);
-            0
-        }
-        _ => -1,
-    }
-}
-
-fn sys_send(channel_id: u32, msg_ptr: u64) -> i64 {
-    let msg = unsafe { *(msg_ptr as *const ipc::Message) };
-    match ipc::send(channel_id, &msg) {
-        Ok(()) => 0,
-        Err(_) => -1,
-    }
-}
-
-fn sys_recv(channel_id: u32, buf_ptr: u64) -> i64 {
-    // Enable interrupts so the scheduler can run while we block
-    super::interrupt_enable();
-
-    match ipc::recv(channel_id) {
-        Ok(msg) => {
-            unsafe { *(buf_ptr as *mut ipc::Message) = msg };
-            0
-        }
-        Err(_) => -1,
     }
 }
