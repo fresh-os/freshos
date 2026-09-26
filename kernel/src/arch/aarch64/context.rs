@@ -400,7 +400,7 @@ pub fn block_current() {
     t[cur].state = State::Blocked;
     // Enable interrupts and wait — the timer will preempt us
     unsafe {
-        core::arch::asm!("msr DAIFClr, #0x2", options(nomem, nostack));
+        core::arch::asm!("msr DAIFClr, #0x2", options(nostack));
         core::arch::asm!("wfi", options(nomem, nostack));
     }
 }

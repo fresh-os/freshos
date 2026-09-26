@@ -63,13 +63,13 @@ pub fn serial_try_read() -> Option<u8> {
 /// Disable interrupts (mask IRQs via DAIF).
 #[inline(always)]
 pub fn interrupt_disable() {
-    unsafe { core::arch::asm!("msr DAIFSet, #0x2", options(nomem, nostack)) };
+    unsafe { core::arch::asm!("msr DAIFSet, #0x2", options(nostack)) };
 }
 
 /// Enable interrupts (unmask IRQs via DAIF).
 #[inline(always)]
 pub fn interrupt_enable() {
-    unsafe { core::arch::asm!("msr DAIFClr, #0x2", options(nomem, nostack)) };
+    unsafe { core::arch::asm!("msr DAIFClr, #0x2", options(nostack)) };
 }
 
 /// Masks IRQs until dropped, then restores the previous mask.
@@ -85,7 +85,7 @@ impl IrqGuard {
         let daif: u64;
         unsafe {
             core::arch::asm!("mrs {}, DAIF", out(reg) daif, options(nomem, nostack));
-            core::arch::asm!("msr DAIFSet, #0x2", options(nomem, nostack));
+            core::arch::asm!("msr DAIFSet, #0x2", options(nostack));
         }
         IrqGuard(daif)
     }
@@ -94,7 +94,7 @@ impl IrqGuard {
 impl Drop for IrqGuard {
     #[inline(always)]
     fn drop(&mut self) {
-        unsafe { core::arch::asm!("msr DAIF, {}", in(reg) self.0, options(nomem, nostack)) };
+        unsafe { core::arch::asm!("msr DAIF, {}", in(reg) self.0, options(nostack)) };
     }
 }
 
