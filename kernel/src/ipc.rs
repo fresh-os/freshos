@@ -306,6 +306,11 @@ pub fn try_recv(channel_id: u32) -> Option<Message> {
     if id >= MAX_CHANNELS {
         return None;
     }
+    // Built-ins call this with IRQs enabled. A preempting sender (the
+    // keyboard, while the compositor drains its events) updates count and
+    // head under its own mask, so the dequeue must not be interrupted
+    // halfway through its update of count and tail.
+    let _irq = crate::arch::IrqGuard::mask();
     let ch = unsafe { &mut (*channels())[id] };
     if !ch.active {
         return None;
@@ -460,6 +465,9 @@ fn trace_record(entry: TraceEntry) {
 /// Copy the last `max` trace entries into `buf` (oldest first).
 /// Returns the number written.
 pub fn trace_read(buf: &mut [TraceEntry], max: usize) -> usize {
+    // Readers (the dashboard, MCP) run with IRQs enabled; a send in the
+    // middle of the copy would move head and tear the window.
+    let _irq = crate::arch::IrqGuard::mask();
     let tb = unsafe { &*TRACE.0.get() };
     let n = tb.count.min(max).min(buf.len());
     if n == 0 {
