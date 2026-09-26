@@ -80,13 +80,27 @@ exception_vectors:
 
 
 // ===================================================================
-// Heavyweight save: all 31 GPRs + SP_EL0 + ELR_EL1 + SPSR_EL1
-// Used for IRQ preemption where any register could be live.
-// Total: 34 × 8 = 272 bytes on stack.
+// Heavyweight save: all 31 GPRs + SP_EL0 + ELR_EL1 + SPSR_EL1, then the
+// FP/SIMD state (q0-q31, FPCR, FPSR). Used on every exception entry.
+//
+// Frame layout (FRAME_SIZE in context.rs must match):
+//     0..248   x0..x30          (x_n at 8*n)
+//   248        SP_EL0
+//   256        ELR_EL1
+//   264        SPSR_EL1
+//   272..784   q0..q31          (q_n at 272 + 16*n)
+//   784        FPCR
+//   792        FPSR
+// Total: 800 bytes, a multiple of 16, so SP stays 16-byte aligned.
+//
+// The FP area sits above the GPR area so every GPR offset is unchanged.
+// It is saved eagerly because the kernel itself uses the vector registers
+// (memcpy, memset), and a task switch must not leak or clobber one task's
+// FP/SIMD state into another's.
 // ===================================================================
 
 .macro save_all_regs
-    sub     sp, sp, #272
+    sub     sp, sp, #800
     stp     x0,  x1,  [sp, #0]
     stp     x2,  x3,  [sp, #16]
     stp     x4,  x5,  [sp, #32]
@@ -109,9 +123,51 @@ exception_vectors:
     mrs     x12, SPSR_EL1
     stp     x10, x11, [sp, #248]    // SP_EL0, ELR_EL1
     str     x12,      [sp, #264]    // SPSR_EL1
+
+    stp     q0,  q1,  [sp, #272]
+    stp     q2,  q3,  [sp, #304]
+    stp     q4,  q5,  [sp, #336]
+    stp     q6,  q7,  [sp, #368]
+    stp     q8,  q9,  [sp, #400]
+    stp     q10, q11, [sp, #432]
+    stp     q12, q13, [sp, #464]
+    stp     q14, q15, [sp, #496]
+    stp     q16, q17, [sp, #528]
+    stp     q18, q19, [sp, #560]
+    stp     q20, q21, [sp, #592]
+    stp     q22, q23, [sp, #624]
+    stp     q24, q25, [sp, #656]
+    stp     q26, q27, [sp, #688]
+    stp     q28, q29, [sp, #720]
+    stp     q30, q31, [sp, #752]
+    mrs     x10, FPCR
+    mrs     x11, FPSR
+    str     x10, [sp, #784]         // FPCR (beyond stp's reach)
+    str     x11, [sp, #792]         // FPSR
 .endm
 
 .macro restore_all_regs
+    ldr     x10, [sp, #784]
+    ldr     x11, [sp, #792]
+    msr     FPCR, x10
+    msr     FPSR, x11
+    ldp     q0,  q1,  [sp, #272]
+    ldp     q2,  q3,  [sp, #304]
+    ldp     q4,  q5,  [sp, #336]
+    ldp     q6,  q7,  [sp, #368]
+    ldp     q8,  q9,  [sp, #400]
+    ldp     q10, q11, [sp, #432]
+    ldp     q12, q13, [sp, #464]
+    ldp     q14, q15, [sp, #496]
+    ldp     q16, q17, [sp, #528]
+    ldp     q18, q19, [sp, #560]
+    ldp     q20, q21, [sp, #592]
+    ldp     q22, q23, [sp, #624]
+    ldp     q24, q25, [sp, #656]
+    ldp     q26, q27, [sp, #688]
+    ldp     q28, q29, [sp, #720]
+    ldp     q30, q31, [sp, #752]
+
     ldp     x10, x11, [sp, #248]
     ldr     x12,      [sp, #264]
     msr     SP_EL0, x10
@@ -134,7 +190,7 @@ exception_vectors:
     ldp     x26, x27, [sp, #208]
     ldp     x28, x29, [sp, #224]
     ldr     x30,      [sp, #240]
-    add     sp, sp, #272
+    add     sp, sp, #800
 .endm
 
 

@@ -211,8 +211,6 @@ fn check_range(space: &AddressSpace, va: u64, len: u64, write: bool) -> Result<(
     Ok(())
 }
 
-// The syscall layer (EL0 isolation plan, Task 5) is the first caller.
-#[allow(dead_code)]
 pub fn copy_from_user(space: &AddressSpace, va: u64, out: &mut [u8]) -> Result<(), Error> {
     check_range(space, va, out.len() as u64, false)?;
     let mut done = 0;

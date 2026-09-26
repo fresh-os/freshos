@@ -24,6 +24,12 @@ use super::timer;
 pub const MAX_TASKS: usize = 16;
 const KERNEL_STACK_SIZE: usize = 4096 * 4; // 16 KiB kernel stack per task
 
+/// Size of the saved register frame that exception.s's save_all_regs pushes:
+/// the GPRs, SP_EL0, ELR and SPSR at 0..272, then q0-q31, FPCR and FPSR.
+/// A new task's frame is all zeroes apart from the slots set below, so it
+/// starts with zeroed FP/SIMD registers, FPCR = 0 and FPSR = 0.
+const FRAME_SIZE: u64 = 800;
+
 #[derive(Clone, Copy, PartialEq)]
 enum State {
     Free,
@@ -182,7 +188,7 @@ fn reap_pending_frees(current_stack_ptr: u64) {
 
 /// Called from exception.s on every timer IRQ.
 ///
-/// Receives the current task's saved SP (after save_all_regs pushed 272 bytes).
+/// Receives the current task's saved SP (after save_all_regs pushed FRAME_SIZE bytes).
 /// Returns the next task's saved SP to restore.
 #[unsafe(no_mangle)]
 extern "C" fn scheduler_tick_arm(stack_ptr: u64) -> u64 {
@@ -214,6 +220,8 @@ pub fn switch_away(frame: u64) -> u64 {
 /// Run `target` next (direct hand-off). The current task stays ready.
 pub fn hand_off(frame: u64, target: usize) -> u64 {
     let t = unsafe { &mut *tasks() };
+    // Only a ready task has a live saved frame; a Free slot's `sp` is stale.
+    debug_assert!(target < MAX_TASKS && t[target].state == State::Ready);
     let cur = CURRENT.load(Ordering::SeqCst);
     if t[cur].state != State::Free {
         t[cur].sp = frame;
@@ -268,9 +276,9 @@ pub fn spawn_with_arg(entry_addr: u64, arg0: u64) -> usize {
         frame_alloc::allocate_contiguous(KERNEL_STACK_SIZE / 4096).expect("task stack");
     let stack_top = stack_bottom + KERNEL_STACK_SIZE as u64;
 
-    let frame_base = stack_top - 272;
+    let frame_base = stack_top - FRAME_SIZE;
     unsafe {
-        core::ptr::write_bytes(frame_base as *mut u8, 0, 272);
+        core::ptr::write_bytes(frame_base as *mut u8, 0, FRAME_SIZE as usize);
         let slots = frame_base as *mut u64;
         *slots.add(0) = arg0; // x0
         *slots.add(30) = entry_addr; // x30 (LR)
@@ -350,9 +358,9 @@ fn build_el0(id: usize, image: &[u8], arg0: u64, arg1: u64) -> Result<(Task, u64
     let kernel_stack_top = kernel_stack_bottom + KERNEL_STACK_SIZE as u64;
 
     // Seed a frame for restore_all_regs + eret into EL0.
-    let frame_base = kernel_stack_top - 272;
+    let frame_base = kernel_stack_top - FRAME_SIZE;
     unsafe {
-        core::ptr::write_bytes(frame_base as *mut u8, 0, 272);
+        core::ptr::write_bytes(frame_base as *mut u8, 0, FRAME_SIZE as usize);
         let slots = frame_base as *mut u64;
         *slots.add(0) = arg0; // x0
         *slots.add(1) = arg1; // x1

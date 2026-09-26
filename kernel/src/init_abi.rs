@@ -17,6 +17,7 @@ pub const SERVICE_PROBE_BAD_KERNEL: u64 = 10;
 pub const SERVICE_PROBE_BAD_UNMAPPED: u64 = 11;
 pub const SERVICE_PROBE_BAD_CODE: u64 = 12;
 pub const SERVICE_PROBE_BAD_STACK: u64 = 13;
+pub const SERVICE_PROBE_ABI: u64 = 14;
 
 pub const SERVICE_FLAG_AUTOSTART: u64 = 1 << 0;
 pub const SERVICE_FLAG_SUPERVISED: u64 = 1 << 1;
@@ -27,7 +28,7 @@ pub const SERVICE_EXIT_NONE: u64 = 0;
 pub const SERVICE_EXIT_CLEAN: u64 = 1;
 pub const SERVICE_EXIT_FAULT: u64 = 2;
 
-const SERVICE_COUNT: usize = 13;
+const SERVICE_COUNT: usize = 14;
 const SERVICE_NAME_BYTES: usize = 16;
 
 #[repr(C)]
@@ -158,6 +159,12 @@ fn spawn_probe_bad_stack() -> Option<usize> {
     spawn_image("PROBEBAD.ELF", 1)
 }
 
+/// Test-only: checks log sanitising, bad pointers, unknown syscalls and
+/// FP/SIMD state across switches, then exits cleanly.
+fn spawn_probe_abi() -> Option<usize> {
+    spawn_image("PROBEBAD.ELF", 2)
+}
+
 static SERVICES: [ServiceDefinition; SERVICE_COUNT] = [
     ServiceDefinition {
         id: SERVICE_KBD,
@@ -249,6 +256,13 @@ static SERVICES: [ServiceDefinition; SERVICE_COUNT] = [
         flags: SERVICE_FLAG_AUTOSTART,
         restart_period_ticks: 0,
         spawn: spawn_probe_bad_stack,
+    },
+    ServiceDefinition {
+        id: SERVICE_PROBE_ABI,
+        name: "probe-abi",
+        flags: SERVICE_FLAG_AUTOSTART,
+        restart_period_ticks: 0,
+        spawn: spawn_probe_abi,
     },
 ];
 

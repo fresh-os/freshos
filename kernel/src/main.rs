@@ -111,6 +111,10 @@ const CH_MOUSE_EVENTS: u32 = 4;
 fn main() -> Status {
     use serial::serial_println;
 
+    // Before anything else: FP/SIMD must not trap, and every exception now
+    // saves and restores it.
+    arch::enable_fp();
+
     // ---- UEFI: grab framebuffer and memory map (same protocol as x86) ----
     let gop_handle = boot::get_handle_for_protocol::<GraphicsOutput>().expect("GOP not available");
     let mut gop =

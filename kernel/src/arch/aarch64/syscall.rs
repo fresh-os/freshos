@@ -78,7 +78,8 @@ pub fn add_surface(info: SurfaceInfo) -> usize {
 // ---------------------------------------------------------------------------
 
 /// Syscall entry from exception.s. `frame` is the task's saved register frame
-/// (save_all_regs layout: x0..x30 at 8*n, SP_EL0 at 248, ELR at 256, SPSR at 264).
+/// (save_all_regs layout: x0..x30 at 8*n, SP_EL0 at 248, ELR at 256, SPSR at 264,
+/// then the FP/SIMD state).
 /// Returns the frame to restore.
 #[unsafe(no_mangle)]
 extern "C" fn syscall_entry_arm(frame: u64) -> u64 {

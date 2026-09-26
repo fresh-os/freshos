@@ -60,6 +60,26 @@ pub fn serial_try_read() -> Option<u8> {
     pl011_try_read(board::PL011_BASE)
 }
 
+/// Let EL1 and EL0 use FP/SIMD without trapping: CPACR_EL1.FPEN = 0b11.
+///
+/// Set explicitly rather than inherited from the firmware. The kernel is
+/// built with NEON and uses the vector registers everywhere (memcpy, memset),
+/// EL0 services may use them too, and exception.s saves and restores them on
+/// every exception; any trap here would be an unhandled exception. Call it
+/// first thing at boot.
+pub fn enable_fp() {
+    unsafe {
+        core::arch::asm!(
+            "mrs {tmp}, CPACR_EL1",
+            "orr {tmp}, {tmp}, #(0b11 << 20)",
+            "msr CPACR_EL1, {tmp}",
+            "isb",
+            tmp = out(reg) _,
+            options(nostack),
+        );
+    }
+}
+
 /// Disable interrupts (mask IRQs via DAIF).
 #[inline(always)]
 pub fn interrupt_disable() {
