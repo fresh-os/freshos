@@ -21,9 +21,14 @@ impl Write for Serial {
 }
 
 /// Write a formatted string to the serial port, followed by a newline.
+///
+/// `writeln!` emits a line in several pieces. IRQs stay masked for the
+/// whole line so a tick can't switch to a task whose output lands mid-line;
+/// the LOG syscall already writes under a mask for the same reason.
 macro_rules! serial_println {
     ($($arg:tt)*) => {{
         use core::fmt::Write;
+        let _irq = $crate::arch::IrqGuard::mask();
         let _ = writeln!($crate::serial::Serial, $($arg)*);
     }};
 }
