@@ -163,6 +163,20 @@ def elf_with_wx_segment() -> bytes:
     return (header + segment).ljust(0x80, b"\0")
 
 
+def elf_with_huge_phoff() -> bytes:
+    """A 128-byte aarch64 ELF header whose program headers start 2 bytes
+    before the end of the address space, so any unchecked `e_phoff + n`
+    overflows."""
+    header = struct.pack(
+        "<4sBBBBB7xHHIQQQIHHHHHH",
+        b"\x7fELF", 2, 1, 1, 0, 0,
+        2, 0xB7, 1,
+        0x4_0000_0078, 0xFFFF_FFFF_FFFF_FFFE, 0,
+        0, 64, 56, 1, 64, 0, 0,
+    )
+    return header.ljust(0x80, b"\0")
+
+
 class BufferingTest(FreshOSTestCase):
     # Only this boot has PROBEBUF.ELF, and it leaves off the other probes, so
     # the two buffering probes always find free task slots.
@@ -193,9 +207,21 @@ class BufferingTest(FreshOSTestCase):
 
 
 class MalformedElfTest(FreshOSTestCase):
-    boot_options = {"extra_files": {"BADELF.ELF": elf_with_wx_segment()}}
+    boot_options = {
+        "extra_files": {
+            "BADELF.ELF": elf_with_wx_segment(),
+            "BADPHOFF.ELF": elf_with_huge_phoff(),
+        }
+    }
 
     def test_malformed_elf_is_refused(self) -> None:
         self.boot.wait_for_log(r"refused BADELF\.ELF: segment is writable and executable")
         self.boot.wait_for_log(r"\[init\] cannot start probe-badelf: Invalid")
         self.assertTrue(self.services()["pong"]["running"])
+
+    def test_program_header_offset_overflow_is_refused(self) -> None:
+        self.boot.wait_for_log(r"refused BADPHOFF\.ELF: program header offset overflow")
+        self.boot.wait_for_log(r"\[init\] cannot start probe-badphoff: Invalid")
+        services = self.services()
+        for name in ("pong", "ping", "kbd", "comp", "shell", "dash", "mcp"):
+            self.assertTrue(services[name]["running"], name)

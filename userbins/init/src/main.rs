@@ -57,6 +57,7 @@ const TABLE: &[Service] = &[
     Service { grants: &[(SINK, SEND), (PROBE, RECV)], optional: true, ..service("probe-chan", "PROBECHA.ELF") },
     Service { grants: &[(PING, RECV)], optional: true, ..service("probe-dup-recv", "PROBECHA.ELF") },
     Service { optional: true, ..service("probe-badelf", "BADELF.ELF") },
+    Service { optional: true, ..service("probe-badphoff", "BADPHOFF.ELF") },
     // A supervised receiver that exits after its first message, and a sender
     // of three: the last two must wait in the channel for the restart. The
     // test that wants them stages probe-chan a second time as PROBEBUF.ELF.

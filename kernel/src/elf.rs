@@ -6,22 +6,22 @@ const ET_DYN: u16 = 3;
 const EM_AARCH64: u16 = 0xB7;
 const PT_LOAD: u32 = 1;
 
+// Every header field is untrusted: `off` may come from the file itself, so
+// `off + N` must not overflow (a huge e_phoff used to panic here).
+fn field<const N: usize>(bytes: &[u8], off: usize) -> Option<[u8; N]> {
+    bytes.get(off..off.checked_add(N)?)?.try_into().ok()
+}
+
 fn read_u16(bytes: &[u8], off: usize) -> Option<u16> {
-    bytes
-        .get(off..off + 2)
-        .map(|s| u16::from_le_bytes([s[0], s[1]]))
+    field(bytes, off).map(u16::from_le_bytes)
 }
 
 fn read_u32(bytes: &[u8], off: usize) -> Option<u32> {
-    bytes
-        .get(off..off + 4)
-        .map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+    field(bytes, off).map(u32::from_le_bytes)
 }
 
 fn read_u64(bytes: &[u8], off: usize) -> Option<u64> {
-    bytes
-        .get(off..off + 8)
-        .map(|s| u64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]))
+    field(bytes, off).map(u64::from_le_bytes)
 }
 
 fn align_down(value: u64, align: u64) -> u64 {
@@ -34,6 +34,22 @@ struct ImageLayout {
     phoff: usize,
     phentsize: usize,
     phnum: usize,
+}
+
+/// The fields of a 64-bit program header that the loader reads.
+const PHDR_SIZE: usize = 56;
+
+impl ImageLayout {
+    /// Program header `idx`, as a slice that holds all of its fields, so
+    /// reading them needs no further arithmetic on file-supplied offsets.
+    fn program_header<'a>(&self, bytes: &'a [u8], idx: usize) -> Result<&'a [u8], &'static str> {
+        let start = idx
+            .checked_mul(self.phentsize)
+            .and_then(|off| self.phoff.checked_add(off))
+            .ok_or("program header offset overflow")?;
+        let end = start.checked_add(PHDR_SIZE).ok_or("program header offset overflow")?;
+        bytes.get(start..end).ok_or("truncated program header")
+    }
 }
 
 fn parse_layout(bytes: &[u8]) -> Result<ImageLayout, &'static str> {
@@ -60,27 +76,30 @@ fn parse_layout(bytes: &[u8]) -> Result<ImageLayout, &'static str> {
     if e_type != ET_EXEC && e_type != ET_DYN {
         return Err("unsupported ELF type");
     }
-    if e_phentsize < 56 {
+    if e_phentsize < PHDR_SIZE {
         return Err("bad program header size");
     }
 
+    let layout = ImageLayout {
+        entry: e_entry,
+        phoff: e_phoff,
+        phentsize: e_phentsize,
+        phnum: e_phnum,
+    };
     let mut saw_load = false;
 
     for idx in 0..e_phnum {
-        let ph = idx
-            .checked_mul(e_phentsize)
-            .and_then(|off| e_phoff.checked_add(off))
-            .ok_or("program header offset overflow")?;
-        let p_type = read_u32(bytes, ph).ok_or("truncated program header")?;
+        let ph = layout.program_header(bytes, idx)?;
+        let p_type = read_u32(ph, 0).ok_or("truncated program header")?;
         if p_type != PT_LOAD {
             continue;
         }
 
-        let p_offset = read_u64(bytes, ph + 8).ok_or("missing p_offset")? as usize;
-        let p_vaddr = read_u64(bytes, ph + 16).ok_or("missing p_vaddr")?;
-        let p_filesz = read_u64(bytes, ph + 32).ok_or("missing p_filesz")? as usize;
-        let p_memsz = read_u64(bytes, ph + 40).ok_or("missing p_memsz")? as usize;
-        read_u64(bytes, ph + 48).ok_or("missing p_align")?;
+        let p_offset = read_u64(ph, 8).ok_or("missing p_offset")? as usize;
+        let p_vaddr = read_u64(ph, 16).ok_or("missing p_vaddr")?;
+        let p_filesz = read_u64(ph, 32).ok_or("missing p_filesz")? as usize;
+        let p_memsz = read_u64(ph, 40).ok_or("missing p_memsz")? as usize;
+        read_u64(ph, 48).ok_or("missing p_align")?;
 
         if p_filesz > p_memsz {
             return Err("ELF filesz exceeds memsz");
@@ -104,12 +123,7 @@ fn parse_layout(bytes: &[u8]) -> Result<ImageLayout, &'static str> {
         return Err("ELF has no loadable segments");
     }
 
-    Ok(ImageLayout {
-        entry: e_entry,
-        phoff: e_phoff,
-        phentsize: e_phentsize,
-        phnum: e_phnum,
-    })
+    Ok(layout)
 }
 
 const PF_X: u32 = 1;
@@ -131,15 +145,15 @@ pub fn load_into(
     let image_limit = USER_BASE + USER_SIZE - USER_STACK_SIZE - PAGE;
 
     for idx in 0..layout.phnum {
-        let ph = layout.phoff + idx * layout.phentsize;
-        if read_u32(bytes, ph).ok_or("truncated program header")? != PT_LOAD {
+        let ph = layout.program_header(bytes, idx)?;
+        if read_u32(ph, 0).ok_or("truncated program header")? != PT_LOAD {
             continue;
         }
-        let flags = read_u32(bytes, ph + 4).ok_or("missing p_flags")?;
-        let offset = read_u64(bytes, ph + 8).ok_or("missing p_offset")? as usize;
-        let vaddr = read_u64(bytes, ph + 16).ok_or("missing p_vaddr")?;
-        let filesz = read_u64(bytes, ph + 32).ok_or("missing p_filesz")?;
-        let memsz = read_u64(bytes, ph + 40).ok_or("missing p_memsz")?;
+        let flags = read_u32(ph, 4).ok_or("missing p_flags")?;
+        let offset = read_u64(ph, 8).ok_or("missing p_offset")? as usize;
+        let vaddr = read_u64(ph, 16).ok_or("missing p_vaddr")?;
+        let filesz = read_u64(ph, 32).ok_or("missing p_filesz")?;
+        let memsz = read_u64(ph, 40).ok_or("missing p_memsz")?;
 
         if flags & PF_W != 0 && flags & PF_X != 0 {
             return Err("segment is writable and executable");
@@ -159,6 +173,8 @@ pub fn load_into(
             Perm::ReadOnly
         };
 
+        // parse_layout checked filesz <= memsz and offset + filesz <= the file
+        // length for this same header, so neither sum below can overflow.
         let file_end = vaddr + filesz;
         let mut page = align_down(vaddr, PAGE);
         while page < end {
