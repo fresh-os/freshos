@@ -9,6 +9,7 @@
 use crate::font_aa;
 use crate::framebuffer::{Color, Framebuffer};
 use crate::ipc;
+use freshos_abi::ExitReason;
 use crate::metrics::MetricSample;
 
 // ============================================================================
@@ -44,9 +45,18 @@ const SHELL_BG: Color = Color::new(0x0A, 0x0E, 0x14);
 const DASH_BG: Color = Color::new(0x0A, 0x0E, 0x14);
 const PANEL_BG: Color = Color::new(0x08, 0x0C, 0x14);
 
-// IPC channels (must match main.rs setup)
-const CH_KBD_EVENTS: u32 = 0;
-const CH_SHELL_KEYS: u32 = 1;
+/// The in-kernel built-ins init may start as "builtin:<name>" until each moves
+/// out to its own binary (decision 0006).
+pub fn builtin(name: &[u8]) -> Option<fn() -> !> {
+    match name {
+        b"kbd" => Some(keyboard_el1),
+        b"comp" => Some(compositor_el1),
+        b"shell" => Some(shell_el1),
+        b"dash" => Some(dashboard_el1),
+        b"mcp" => Some(crate::mcp::bridge_el1),
+        _ => None,
+    }
+}
 
 // ============================================================================
 // EL1 helpers — direct kernel calls
@@ -864,7 +874,7 @@ pub fn compositor_el1() -> ! {
         let mut redraw_inactive_window_full = false;
         let mut active_surface_damage: Option<Rect> = None;
 
-        while let Some(msg) = ipc::try_recv(CH_KBD_EVENTS) {
+        while let Some(msg) = ipc::try_recv(ipc::KBD_EVENTS) {
             if msg.tag != ipc::MSG_KEY_DOWN {
                 continue;
             }
@@ -901,7 +911,7 @@ pub fn compositor_el1() -> ! {
                     }
                 }
                 _ if active_ws == 0 => {
-                    let _ = ipc::send(CH_SHELL_KEYS, &msg);
+                    let _ = ipc::send(ipc::SHELL_KEYS, &msg);
                 }
                 _ => {}
             }
@@ -1392,36 +1402,6 @@ fn shell_print_line(
     shell_advance_line(surf, left, start_y, max_y, line_h, cy, damage);
 }
 
-fn shell_service_state_label(status: crate::init_abi::ServiceStatus) -> &'static str {
-    if status.state & crate::init_abi::SERVICE_STATE_RUNNING != 0 {
-        "run"
-    } else if status.last_exit_reason == crate::init_abi::SERVICE_EXIT_FAULT {
-        "fault"
-    } else if status.last_exit_reason == crate::init_abi::SERVICE_EXIT_CLEAN {
-        "down"
-    } else {
-        "idle"
-    }
-}
-
-fn shell_service_exit_label(reason: u64) -> &'static str {
-    match reason {
-        crate::init_abi::SERVICE_EXIT_CLEAN => "clean",
-        crate::init_abi::SERVICE_EXIT_FAULT => "fault",
-        _ => "-",
-    }
-}
-
-fn shell_service_line_color(status: crate::init_abi::ServiceStatus) -> Color {
-    if status.state & crate::init_abi::SERVICE_STATE_RUNNING != 0 {
-        TEXT
-    } else if status.last_exit_reason == crate::init_abi::SERVICE_EXIT_FAULT {
-        ORANGE
-    } else {
-        SUBTLE
-    }
-}
-
 fn shell_run_command(
     surf: &mut Framebuffer,
     left: usize,
@@ -1462,36 +1442,36 @@ fn shell_run_command(
                 max_y,
                 line_h,
                 cy,
-                "name    state  task rs ex last",
+                "name             state    task rs  ex  last",
                 SUBTLE,
                 damage,
             );
 
-            for index in 0..crate::init_abi::service_count() {
-                let Some(service) = crate::init_abi::service_record(index) else {
-                    continue;
-                };
-                let Some(status) = crate::init_abi::service_status(service.id) else {
-                    continue;
-                };
-
+            let snapshot = crate::registry::services();
+            for service in snapshot.iter().flatten() {
                 let mut line = LineBuf::<80>::new();
-                line.push_str(service.name);
-                line.pad_to(8);
-                line.push_str(shell_service_state_label(status));
-                line.pad_to(15);
-                if status.task_id == 0 {
-                    line.push_byte(b'-');
-                } else {
-                    line.push_u64(status.task_id);
-                }
-                line.pad_to(20);
-                line.push_u64(status.restart_count);
-                line.pad_to(23);
-                line.push_u64(status.exit_count);
+                line.push_str(service.name.as_str());
+                line.pad_to(17);
+                line.push_str(if service.task.is_some() { "running" } else { "stopped" });
                 line.pad_to(26);
-                line.push_str(shell_service_exit_label(status.last_exit_reason));
+                match service.task {
+                    Some(task) => line.push_u64(task as u64),
+                    None => line.push_byte(b'-'),
+                }
+                line.pad_to(31);
+                line.push_u64(service.starts.saturating_sub(1));
+                line.pad_to(35);
+                line.push_u64(service.exits);
+                line.pad_to(39);
+                line.push_str(service.last_exit.map(ExitReason::as_str).unwrap_or("-"));
 
+                let color = if service.task.is_some() {
+                    GREEN
+                } else if service.last_exit == Some(ExitReason::Fault) {
+                    ORANGE
+                } else {
+                    SUBTLE
+                };
                 shell_print_line(
                     surf,
                     left,
@@ -1500,7 +1480,7 @@ fn shell_run_command(
                     line_h,
                     cy,
                     line.as_str(),
-                    shell_service_line_color(status),
+                    color,
                     damage,
                 );
             }
@@ -1535,92 +1515,12 @@ fn shell_run_command(
                 return;
             }
 
-            let Some(service) = crate::init_abi::find_service(service_name) else {
-                let mut line = LineBuf::<80>::new();
-                line.push_str("unknown service: ");
-                line.push_str(service_name);
-                shell_print_line(
-                    surf,
-                    left,
-                    start_y,
-                    max_y,
-                    line_h,
-                    cy,
-                    line.as_str(),
-                    ORANGE,
-                    damage,
-                );
-                return;
+            let request = ipc::Message::new(freshos_abi::tag::RESTART_REQUEST).with_name(service_name);
+            let text = match ipc::send(ipc::INIT_INBOX, &request) {
+                Ok(_) => "asked init to restart it",
+                Err(_) => "init's inbox is full",
             };
-
-            if let Some(status) = crate::init_abi::service_status(service.id) {
-                if status.state & crate::init_abi::SERVICE_STATE_RUNNING != 0 {
-                    let mut line = LineBuf::<80>::new();
-                    line.push_str(service.name);
-                    line.push_str(" already running");
-                    if status.task_id > 0 {
-                        line.push_str(" (task ");
-                        line.push_u64(status.task_id);
-                        line.push_byte(b')');
-                    }
-                    shell_print_line(
-                        surf,
-                        left,
-                        start_y,
-                        max_y,
-                        line_h,
-                        cy,
-                        line.as_str(),
-                        SUBTLE,
-                        damage,
-                    );
-                    return;
-                }
-            }
-
-            match crate::init_abi::spawn_service(service.id) {
-                Ok(task_id) => {
-                    let mut line = LineBuf::<80>::new();
-                    line.push_str("started ");
-                    line.push_str(service.name);
-                    line.push_str(" task ");
-                    line.push_u64(task_id as u64);
-                    shell_print_line(
-                        surf,
-                        left,
-                        start_y,
-                        max_y,
-                        line_h,
-                        cy,
-                        line.as_str(),
-                        GREEN,
-                        damage,
-                    );
-                }
-                Err(code) => {
-                    let mut line = LineBuf::<80>::new();
-                    line.push_str("restart failed ");
-                    line.push_str(service.name);
-                    line.push_str(" code ");
-                    if code < 0 {
-                        line.push_byte(b'-');
-                        line.push_u64((-code) as u64);
-                    } else {
-                        line.push_u64(code as u64);
-                    }
-                    shell_print_line(
-                        surf,
-                        left,
-                        start_y,
-                        max_y,
-                        line_h,
-                        cy,
-                        line.as_str(),
-                        ORANGE,
-                        damage,
-                    );
-                }
-            }
+            shell_print_line(surf, left, start_y, max_y, line_h, cy, text, SUBTLE, damage);
         }
         Some(other) => {
             let mut line = LineBuf::<80>::new();
@@ -1676,7 +1576,7 @@ pub fn shell_el1() -> ! {
     crate::serial::serial_println!("[shell] waiting for keys");
 
     loop {
-        match ipc::recv(CH_SHELL_KEYS) {
+        match ipc::recv(ipc::SHELL_KEYS) {
             Ok(msg) => {
                 if msg.tag != ipc::MSG_KEY_DOWN {
                     continue;
@@ -1816,13 +1716,15 @@ fn flow_node_x(slot: usize, total: usize) -> usize {
 
 /// Label for a task id: the kernel-registered name, else "t<id>", and "?" for
 /// an unknown/out-of-range id (e.g. an unattributed receiver).
-fn flow_name_buf(id: usize, buf: &mut [u8; 8]) -> &str {
+fn flow_name_buf(id: usize, buf: &mut [u8; 16]) -> &str {
     if id >= FLOW_MAX {
         return "?";
     }
-    let name = crate::task_names::name(id);
+    let name = crate::registry::name(id);
     if !name.is_empty() {
-        return name;
+        let bytes = name.as_str().as_bytes();
+        buf[..bytes.len()].copy_from_slice(bytes);
+        return core::str::from_utf8(&buf[..bytes.len()]).unwrap_or("?");
     }
     buf[0] = b't';
     if id >= 10 {
@@ -2008,7 +1910,7 @@ pub fn dashboard_el1() -> ! {
         y += 22;
 
         // Message flow — live diagram. Nodes and labels come from the kernel
-        // (the trace + task_names registry), not a hardcoded table, so identity
+        // (the trace + the kernel's task registry), not a hardcoded table, so identity
         // stays honest as the scheduler assigns ids.
         let header_y = y;
         surf.draw_aa_string(14, y, "Message Flow", ORANGE, DASH_BG);
@@ -2079,8 +1981,8 @@ pub fn dashboard_el1() -> ! {
         // Caption: the most recent message as "from -> to  TAG", kernel names.
         if count > 0 {
             let e = &trace_buf[count - 1];
-            let mut fbuf = [0u8; 8];
-            let mut tbuf = [0u8; 8];
+            let mut fbuf = [0u8; 16];
+            let mut tbuf = [0u8; 16];
             let from = flow_name_buf(e.from_task as usize, &mut fbuf);
             let to = flow_name_buf(e.to_task as usize, &mut tbuf);
             let mut rx = 14 + "Message Flow".len() * font_aa::GLYPH_W + 16;
@@ -2124,7 +2026,7 @@ pub fn dashboard_el1() -> ! {
                 4,
                 FLOW_PALETTE[slot % FLOW_PALETTE.len()],
             );
-            let mut nbuf = [0u8; 8];
+            let mut nbuf = [0u8; 16];
             let label = flow_name_buf(id, &mut nbuf);
             let lx = nx.saturating_sub(label.len() * font_aa::GLYPH_W / 2);
             surf.draw_aa_string(lx, label_y, label, SUBTLE, DASH_BG);
@@ -2184,7 +2086,7 @@ pub fn keyboard_el1() -> ! {
             let mut msg = ipc::Message::new(ipc::MSG_KEY_DOWN);
             msg.payload[0] = ch as u64;
             msg.payload[2] = irq_ns; // for latency measurement
-            let _ = ipc::send(CH_KBD_EVENTS, &msg);
+            let _ = ipc::send(ipc::KBD_EVENTS, &msg);
         }
         yield_now();
     }

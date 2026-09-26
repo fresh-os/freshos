@@ -92,7 +92,7 @@ extern "C" fn exception_current_sync(esr: u64, elr: u64, far: u64) -> ! {
     serial_println!("  Task: {}", task_id);
     log_exception(esr, elr, far);
     serial_println!("  Action: terminate faulting task");
-    super::context::terminate_current_with_reason(crate::init_abi::SERVICE_EXIT_FAULT)
+    super::context::terminate_current(freshos_abi::ExitReason::Fault)
 }
 
 #[unsafe(no_mangle)]
@@ -113,5 +113,5 @@ extern "C" fn exception_lower_sync(esr: u64, elr: u64, far: u64) -> ! {
     serial_println!("  Task: {}", task_id);
     log_exception(esr, elr, far);
     serial_println!("  Action: terminate faulting task");
-    super::context::terminate_current_with_reason(crate::init_abi::SERVICE_EXIT_FAULT)
+    super::context::terminate_current(freshos_abi::ExitReason::Fault)
 }

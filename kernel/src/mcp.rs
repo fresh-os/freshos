@@ -42,7 +42,7 @@ const VIEWS: &[View] = &[
     },
     View {
         name: "services",
-        description: "Every service init knows about: its task, whether it is running, restart and exit counts, and why it last exited.",
+        description: "Every service started so far, from the kernel's registry: its task, whether it is running, restart and exit counts, and why it last exited.",
         read: services_view,
     },
     View {
@@ -65,7 +65,7 @@ const VIEWS: &[View] = &[
 pub fn bridge_el1() -> ! {
     let Some(base) = board::MCP_UART_BASE else {
         serial_println!("[mcp] no MCP UART on {}; bridge not started", board::NAME);
-        arch::context::terminate_current();
+        arch::context::terminate_current(freshos_abi::ExitReason::Clean);
     };
     arch::pl011_enable(base);
     serial_println!("[mcp] listening on the second UART");
@@ -225,25 +225,27 @@ fn system_view() -> Value {
         "uptime_ns": arch::time_ns(),
         "tasks": arch::context::task_count(),
         "ipc_channels": ipc::channel_count(),
+        "frames_free": crate::frame_alloc::free_count(),
         "heap": { "used_bytes": crate::heap::used(), "total_bytes": crate::heap::total() },
     })
 }
 
 fn services_view() -> Value {
-    let services: Vec<Value> = (0..crate::init_abi::service_count())
-        .filter_map(crate::init_abi::service_record)
-        .map(|record| {
-            let status = crate::init_abi::service_status(record.id);
+    // Iterate the snapshot by reference: moving the 32-entry array through
+    // iterator adapters costs several copies of it per layer in a debug
+    // build, which overflowed the bridge's 16 KiB kernel stack.
+    let snapshot = crate::registry::services();
+    let services: Vec<Value> = snapshot
+        .iter()
+        .flatten()
+        .map(|s| {
             json!({
-                "name": record.name,
-                "id": record.id,
-                "task": status.map(|s| s.task_id),
-                "running": status.is_some_and(|s| s.state & crate::init_abi::SERVICE_STATE_RUNNING != 0),
-                "restarts": status.map(|s| s.restart_count),
-                "exits": status.map(|s| s.exit_count),
-                "last_exit": status
-                    .filter(|s| s.exit_count > 0)
-                    .map(|s| crate::init_abi::exit_reason_name(s.last_exit_reason)),
+                "name": s.name.as_str(),
+                "task": s.task,
+                "running": s.task.is_some(),
+                "restarts": s.starts.saturating_sub(1),
+                "exits": s.exits,
+                "last_exit": s.last_exit.map(|r| r.as_str()),
             })
         })
         .collect();
@@ -253,8 +255,8 @@ fn services_view() -> Value {
 fn tasks_view() -> Value {
     let tasks: Vec<Value> = (0..arch::context::MAX_TASKS)
         .filter_map(|id| {
-            let name = crate::task_names::name(id);
-            (!name.is_empty()).then(|| json!({ "id": id, "name": name }))
+            let name = crate::registry::name(id);
+            (!name.is_empty()).then(|| json!({ "id": id, "name": name.as_str() }))
         })
         .collect();
     json!(tasks)
@@ -290,8 +292,8 @@ fn trace_view() -> Value {
 }
 
 fn task_json(id: usize) -> Value {
-    let name = crate::task_names::name(id);
-    json!({ "id": id, "name": if name.is_empty() { Value::Null } else { json!(name) } })
+    let name = crate::registry::name(id);
+    json!({ "id": id, "name": if name.is_empty() { Value::Null } else { json!(name.as_str()) } })
 }
 
 fn metrics_view() -> Value {

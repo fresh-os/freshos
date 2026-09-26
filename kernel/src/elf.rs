@@ -1,11 +1,3 @@
-use crate::frame_alloc;
-
-pub struct LoadedImage {
-    pub entry: u64,
-    pub base: u64,
-    pub size: usize,
-}
-
 const ELF_MAGIC: &[u8; 4] = b"\x7FELF";
 const ELFCLASS64: u8 = 2;
 const ELFDATA2LSB: u8 = 1;
@@ -37,16 +29,8 @@ fn align_down(value: u64, align: u64) -> u64 {
     value & !(align - 1)
 }
 
-fn align_up(value: u64, align: u64) -> u64 {
-    debug_assert!(align.is_power_of_two());
-    (value + align - 1) & !(align - 1)
-}
-
 struct ImageLayout {
     entry: u64,
-    min_vaddr: u64,
-    image_span: u64,
-    max_align: u64,
     phoff: usize,
     phentsize: usize,
     phnum: usize,
@@ -80,9 +64,6 @@ fn parse_layout(bytes: &[u8]) -> Result<ImageLayout, &'static str> {
         return Err("bad program header size");
     }
 
-    let mut min_vaddr = u64::MAX;
-    let mut max_vaddr = 0u64;
-    let mut max_align = 4096u64;
     let mut saw_load = false;
 
     for idx in 0..e_phnum {
@@ -99,7 +80,7 @@ fn parse_layout(bytes: &[u8]) -> Result<ImageLayout, &'static str> {
         let p_vaddr = read_u64(bytes, ph + 16).ok_or("missing p_vaddr")?;
         let p_filesz = read_u64(bytes, ph + 32).ok_or("missing p_filesz")? as usize;
         let p_memsz = read_u64(bytes, ph + 40).ok_or("missing p_memsz")? as usize;
-        let p_align = read_u64(bytes, ph + 48).ok_or("missing p_align")?.max(4096);
+        read_u64(bytes, ph + 48).ok_or("missing p_align")?;
 
         if p_filesz > p_memsz {
             return Err("ELF filesz exceeds memsz");
@@ -113,83 +94,21 @@ fn parse_layout(bytes: &[u8]) -> Result<ImageLayout, &'static str> {
         }
 
         saw_load = true;
-        min_vaddr = min_vaddr.min(align_down(p_vaddr, 4096));
-        let end = p_vaddr
+        p_vaddr
             .checked_add(p_memsz as u64)
             .and_then(|end| end.checked_add(4095))
             .ok_or("ELF segment address overflow")?;
-        max_vaddr = max_vaddr.max(end & !4095);
-        max_align = max_align.max(p_align);
     }
 
     if !saw_load {
         return Err("ELF has no loadable segments");
     }
 
-    let image_span = max_vaddr
-        .checked_sub(min_vaddr)
-        .ok_or("ELF image span overflow")?;
-
     Ok(ImageLayout {
         entry: e_entry,
-        min_vaddr,
-        image_span,
-        max_align,
         phoff: e_phoff,
         phentsize: e_phentsize,
         phnum: e_phnum,
-    })
-}
-
-fn copy_segments(bytes: &[u8], layout: &ImageLayout, image_base: u64) -> Result<(), &'static str> {
-    unsafe {
-        core::ptr::write_bytes(image_base as *mut u8, 0, layout.image_span as usize);
-    }
-
-    for idx in 0..layout.phnum {
-        let ph = layout.phoff + idx * layout.phentsize;
-        let p_type = read_u32(bytes, ph).ok_or("truncated program header")?;
-        if p_type != PT_LOAD {
-            continue;
-        }
-
-        let p_offset = read_u64(bytes, ph + 8).ok_or("missing p_offset")? as usize;
-        let p_vaddr = read_u64(bytes, ph + 16).ok_or("missing p_vaddr")?;
-        let p_filesz = read_u64(bytes, ph + 32).ok_or("missing p_filesz")? as usize;
-        // Place each segment at its offset from the image's lowest address.
-        // (A bias of image_base - min_vaddr would underflow: userbins are
-        // linked at 0x4_0000_0000, above RAM.)
-        let dest = image_base
-            .checked_add(p_vaddr - layout.min_vaddr)
-            .ok_or("ELF destination overflow")?;
-
-        unsafe {
-            core::ptr::copy_nonoverlapping(bytes.as_ptr().add(p_offset), dest as *mut u8, p_filesz);
-        }
-    }
-
-    Ok(())
-}
-
-pub fn load_image(bytes: &[u8]) -> Result<LoadedImage, &'static str> {
-    let layout = parse_layout(bytes)?;
-    let alloc_bytes = layout
-        .image_span
-        .checked_add(layout.max_align)
-        .ok_or("ELF allocation overflow")?;
-    let alloc_pages = align_up(alloc_bytes, 4096) as usize / 4096;
-    let raw_base = frame_alloc::allocate_contiguous(alloc_pages).ok_or("out of frames for ELF")?;
-    let image_base = align_up(raw_base, layout.max_align);
-    copy_segments(bytes, &layout, image_base)?;
-
-    Ok(LoadedImage {
-        entry: layout
-            .entry
-            .checked_sub(layout.min_vaddr)
-            .and_then(|offset| image_base.checked_add(offset))
-            .ok_or("ELF entry outside the image")?,
-        base: image_base,
-        size: layout.image_span as usize,
     })
 }
 

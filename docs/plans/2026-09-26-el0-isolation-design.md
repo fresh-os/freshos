@@ -243,15 +243,16 @@ EL1 tasks run on the kernel-only table.
 touches EL0 memory. The kernel currently turns it off; this spec turns it
 back on (`PSTATE.PAN = 1`, `SCTLR_EL1.SPAN = 0`, so it's also set on every
 exception entry). The only code that reads or writes user memory is the pair
-of copy helpers in section 4, which lift PAN briefly.
+of copy helpers in section 4. They copy through the kernel's map of the
+physical frames the task's own table points to, never through the user
+address, so PAN is never lifted.
 
 **Memory type.** User pages use the same memory attributes the firmware
 uses for RAM, read from its mapping of the kernel image at boot.
 
 **Retired:** `grant_user_access` and its global permission patching, the
-special 2 MiB region for `fault`, and fixed-bias ELF loading
-(`elf::load_image`). `make_executable` survives only if the in-kernel
-built-ins still need it.
+special 2 MiB region for `fault`, fixed-bias ELF loading
+(`elf::load_image`), and `make_executable`.
 
 ## 4. Syscalls, handles and validation
 
@@ -284,7 +285,7 @@ process may share its receive right.
 | 5 | `time_ns()` | Nanoseconds since boot | – |
 | 6 | `log(ptr, len)` | Write a log line | Text readable; capped at 256 bytes. The kernel prefixes the task's registered name. |
 | 7 | `channel_create()` | New channel; returns a handle with `SEND` and `RECV` | Caller is `init` |
-| 8 | `spawn(*request)` | Start a service by binary name, copying the listed grants into its table in order. Returns the task id. | Caller is `init`; each grant names a handle `init` holds, with rights no wider than `init`'s; `RECV` still available |
+| 8 | `spawn(*request)` | Start a service by binary name, with the listed grants as its handles, in order: `SEND` is copied, `RECV` moves (see section 5). Returns the task id. | Caller is `init`; each grant names a handle `init` holds, with rights no wider than `init`'s; `RECV` still available |
 
 The old EL0 syscalls for the framebuffer, surfaces, trace and raw debug
 output are removed. The in-kernel built-ins read those directly.
@@ -298,8 +299,8 @@ output are removed. The in-kernel built-ins read those directly.
 - it's mapped in the caller's own page table, with read permission (in) or
   write permission (out).
 
-Only then does the copy run, with PAN lifted for its duration. The kernel
-runs on one CPU and a task's mappings don't change during its own syscall,
+Only then does the copy run, through the physical frames, so PAN stays on.
+The kernel runs on one CPU and a task's mappings don't change during its own syscall,
 so a passed check can't turn into a faulting copy.
 
 **Errors are returned, not fatal.** A bad pointer, missing handle, missing
@@ -335,13 +336,14 @@ tests; the median counts only successful round trips.
 1. While UEFI's file access is still available, the kernel loads every
    `.ELF` in `\EFI\FreshOS\` into a table of named boot images. The
    hardcoded list of four files goes.
-2. The kernel creates two channels for `init`:
-   - **task events**: `init` holds `RECV`; the kernel sends on it;
-   - **init control**: `init` holds `RECV`. It's for requests such as
-     restarts. During the transition, the in-kernel shell sends to it by
-     raw number.
-3. The kernel starts exactly one task, `init` from `INIT.ELF`, with those
-   two handles. If `INIT.ELF` is missing, the kernel prints
+2. The kernel creates three channels: the keyboard's events and the shell's
+   keys (for the in-kernel built-ins, by number), and **`init`'s inbox**,
+   channel 2. A task waits on one channel at a time, so `init` has one
+   inbox for everything it hears: task-exit notices from the kernel
+   (sender 0) and restart requests (from the in-kernel shell, by number,
+   during the transition), told apart by tag.
+3. The kernel starts exactly one task, `init` from `INIT.ELF`, with `RECV`
+   on its inbox as handle 0. If `INIT.ELF` is missing, the kernel prints
    `INIT.ELF missing from \EFI\FreshOS — nothing to run` and halts (0006).
 
 **`init`'s service table** is compiled into `init`, and is the one place
@@ -371,10 +373,13 @@ asks for a second receiver on `PING`) are `optional`, so they only exist
 when a test stages them.
 
 **Supervision.** On every task exit or fault, the kernel sends
-`TASK_EXITED { task, reason }` on the task-events channel. `init` waits on
-task events and control requests using `recv` with a deadline set to its
-next pending restart, then restarts supervised services on schedule. It
-never polls.
+`TASK_EXITED { task, reason }` on `init`'s inbox, as sender 0; `init`
+ignores a `TASK_EXITED` from anyone else. A notice is never lost to a full
+inbox: it waits in a small kernel backlog and moves into the inbox, in
+order, as `init` makes room. `init` waits on its inbox using `recv` with a
+deadline set to its next pending restart, then restarts supervised services
+on schedule. It never polls. If `init` itself exits or faults, the kernel
+prints why and halts: nothing is left to supervise.
 
 **The kernel keeps the facts; `init` keeps the policy.**
 
@@ -383,12 +388,15 @@ never polls.
   exit count, last exit reason, and how many times a service of that name
   has started. The MCP views, the flow view and the dashboard read the
   registry, so none of them trusts `init`'s account. It absorbs
-  `task_names.rs`.
+  `task_names.rs`. `spawn` records the new task's name and service, and
+  moves its receive rights, before the task can first run, so even a task
+  that exits on its first tick is charged to the right service. The ELF
+  load itself runs with interrupts on.
 - `init` owns the rules: what to start, with which grants, and what to
   restart when.
 
 **The in-kernel shell** reads the registry for `services`, and sends
-`RESTART_REQUEST { name }` on the init-control channel for `restart`,
+`RESTART_REQUEST { name }` on `init`'s inbox for `restart`,
 instead of calling `init`'s internals.
 
 **Deleted:** `init_abi.rs`, `task_names.rs` (absorbed into the registry),
@@ -413,6 +421,17 @@ and the hardcoded ELF loading in `main.rs`.
 
 ## What changes elsewhere
 
+- **Receive rights move on grant and come home on exit.** `spawn` moves a
+  granted `RECV` out of `init`'s handle into the child; the channel records
+  where it came from. When the child exits, the right returns to that
+  handle, and any messages queued meanwhile wait there for the next
+  receiver: the manifesto's "channels buffer during the restart". Asking to
+  grant a `RECV` that has already moved gives `ReceiverTaken`.
+- **Built-ins during the transition.** `init`'s table starts the in-kernel
+  built-ins by the binary name `builtin:<name>`, so the kernel still starts
+  only `init` (decision 0006) and `init` owns all startup policy. They run
+  at EL1 and hold no handles. Each later spec that moves a built-in out
+  deletes its `builtin:` entry.
 - `AGENTS.md`: the service model, syscall table, how to add a userbin, and
   how to run tests.
 - `docs/Where-We-Are.md`: status once this lands.

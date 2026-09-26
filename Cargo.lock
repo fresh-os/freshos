@@ -112,6 +112,9 @@ dependencies = [
 [[package]]
 name = "freshos-init"
 version = "0.1.0"
+dependencies = [
+ "freshos-rt",
+]
 
 [[package]]
 name = "freshos-kernel"

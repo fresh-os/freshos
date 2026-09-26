@@ -12,7 +12,7 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use freshos_abi::{Error, USER_BASE, USER_SIZE, USER_STACK_SIZE};
+use freshos_abi::{Error, ExitReason, Handle, Rights, USER_BASE, USER_SIZE, USER_STACK_SIZE};
 
 use crate::frame_alloc;
 use crate::handles::HandleTable;
@@ -24,7 +24,12 @@ use super::gic;
 use super::timer;
 
 pub const MAX_TASKS: usize = 16;
-const KERNEL_STACK_SIZE: usize = 4096 * 4; // 16 KiB kernel stack per task
+/// 32 KiB kernel stack per task. Kernel stacks have no guard page, so an
+/// overflow silently corrupts the neighbouring task's stack. Measured in a
+/// debug build: the MCP bridge peaks near 14 KiB rendering a view, and init
+/// near 12 KiB in SPAWN (an ELF load, with a nested tick on top). 16 KiB
+/// overflowed.
+const KERNEL_STACK_SIZE: usize = 4096 * 8;
 
 /// Size of the saved register frame that exception.s's save_all_regs pushes:
 /// the GPRs, SP_EL0, ELR and SPSR at 0..272, then q0-q31, FPCR and FPSR.
@@ -104,6 +109,9 @@ const NONE: usize = usize::MAX;
 static DONOR: AtomicUsize = AtomicUsize::new(NONE);
 static TARGET: AtomicUsize = AtomicUsize::new(NONE);
 static COUNT: AtomicUsize = AtomicUsize::new(0);
+/// The task running init (0 until the kernel starts it). Its exit halts the
+/// system: nothing else supervises.
+static INIT_TASK: AtomicUsize = AtomicUsize::new(0);
 
 fn tasks() -> *mut [Task; MAX_TASKS] {
     TASKS.0.get()
@@ -150,12 +158,16 @@ fn release(id: usize) {
 }
 
 /// Fill a claimed slot with a ready task, in one step the scheduler can't
-/// interrupt.
-fn install(id: usize, task: Task) {
+/// interrupt. `bind` runs in that same step, before the task can run: it
+/// records the task's name and service and moves its receive rights, so
+/// even a task that exits on its first tick is charged to the right service
+/// and gives its rights back to the right home.
+fn install(id: usize, task: Task, bind: impl FnOnce(usize)) {
     let _irq = super::IrqGuard::mask();
     let t = unsafe { &mut *tasks() };
     debug_assert!(t[id].state == State::Reserved);
     t[id] = task;
+    bind(id);
     COUNT.store(task_count(), Ordering::SeqCst);
 }
 
@@ -353,6 +365,21 @@ fn set_saved_x0(frame: u64, value: i64) {
     unsafe { *(frame as *mut u64) = value as u64 };
 }
 
+/// `task`'s handle table. The caller must be the only one changing it: init
+/// (in its own syscalls, which run with IRQs masked while they touch it) or
+/// the retirement of a task whose receive rights go home to it.
+pub fn handles_mut(task: usize) -> &'static mut HandleTable {
+    unsafe { &mut (*tasks())[task].handles }
+}
+
+pub fn set_init_task(id: usize) {
+    INIT_TASK.store(id, Ordering::SeqCst);
+}
+
+pub fn init_task() -> usize {
+    INIT_TASK.load(Ordering::SeqCst)
+}
+
 /// Initialise the scheduler with task 0 (the boot/idle task).
 pub fn init(ttbr0: u64) {
     KERNEL_TTBR0.store(ttbr0, Ordering::SeqCst);
@@ -369,26 +396,25 @@ pub fn init(ttbr0: u64) {
     CURRENT.store(0, Ordering::SeqCst);
 }
 
-/// Spawn a kernel-mode task (EL1) — used when EL0 isn't available (HVF).
+/// Spawn a kernel-mode task (EL1): one of the in-kernel built-ins.
 ///
-/// Seeds a fake exception frame with SPSR_EL1 = EL1h + IRQs enabled.
-pub fn spawn(entry: fn() -> !) -> usize {
-    spawn_with_arg(entry as *const () as u64, 0)
-}
-
-pub fn spawn_with_arg(entry_addr: u64, arg0: u64) -> usize {
+/// Seeds a fake exception frame with SPSR_EL1 = EL1h + IRQs enabled. `bind`
+/// runs before the task can run (see `install`).
+pub fn spawn(entry: fn() -> !, bind: impl FnOnce(usize)) -> Result<usize, SpawnError> {
+    let entry_addr = entry as *const () as u64;
     reap_pending_frees(0);
-    let id = claim_slot().expect("too many tasks");
+    let id = claim_slot().ok_or(SpawnError::NoSlot)?;
 
-    let stack_bottom =
-        frame_alloc::allocate_contiguous(KERNEL_STACK_SIZE / 4096).expect("task stack");
+    let Some(stack_bottom) = frame_alloc::allocate_contiguous(KERNEL_STACK_SIZE / 4096) else {
+        release(id);
+        return Err(SpawnError::OutOfMemory);
+    };
     let stack_top = stack_bottom + KERNEL_STACK_SIZE as u64;
 
     let frame_base = stack_top - FRAME_SIZE;
     unsafe {
         core::ptr::write_bytes(frame_base as *mut u8, 0, FRAME_SIZE as usize);
         let slots = frame_base as *mut u64;
-        *slots.add(0) = arg0; // x0
         *slots.add(30) = entry_addr; // x30 (LR)
         *slots.add(32) = entry_addr; // ELR_EL1
         *slots.add(33) = 0x0000_0005; // SPSR: EL1h, IRQs enabled
@@ -404,6 +430,7 @@ pub fn spawn_with_arg(entry_addr: u64, arg0: u64) -> usize {
             state: State::Ready,
             ..EMPTY_TASK
         },
+        bind,
     );
 
     serial_println!(
@@ -413,7 +440,7 @@ pub fn spawn_with_arg(entry_addr: u64, arg0: u64) -> usize {
         stack_bottom,
         stack_top
     );
-    id
+    Ok(id)
 }
 
 #[derive(Debug)]
@@ -425,18 +452,23 @@ pub enum SpawnError {
 
 /// Start an EL0 task from an ELF image, in its own address space. `arg0` and
 /// `arg1` arrive in x0 and x1 at the entry point (freshos-rt passes them to
-/// `main` as the handle count and the service's argument).
+/// `main` as the handle count and the service's argument). `bind` runs
+/// before the task can run (see `install`).
+///
+/// Only the slot claim and the install mask IRQs; the ELF load in between
+/// runs with whatever mask the caller has (the SPAWN syscall unmasks it).
 pub fn spawn_el0(
     image: &[u8],
     handles: HandleTable,
     arg0: u64,
     arg1: u64,
+    bind: impl FnOnce(usize),
 ) -> Result<usize, SpawnError> {
     reap_pending_frees(0);
     let id = claim_slot().ok_or(SpawnError::NoSlot)?;
     match build_el0(id, image, handles, arg0, arg1) {
         Ok((task, entry)) => {
-            install(id, task);
+            install(id, task, bind);
             serial_println!("    task {} el0 asid={} entry={:#x}", id, id, entry);
             Ok(id)
         }
@@ -549,19 +581,34 @@ pub fn unblock(task_id: usize) {
 }
 
 /// Remove the current task: free its address space, queue its kernel stack,
-/// free its slot, and record its exit. The caller is still running on that
-/// stack and must switch away (a syscall returns through the scheduler; a
-/// fault waits for the next tick).
+/// return its receive rights to where they came from, free its slot, record
+/// its exit in the registry, and tell init. The caller is still running on
+/// that stack and must switch away (a syscall returns through the
+/// scheduler; a fault waits for the next tick).
 ///
 /// The order matters, and the whole body runs with IRQs masked: the slot
 /// only becomes Free after TTBR0 has left the space and the space's ASID has
 /// been flushed (by its drop). Otherwise a tick could hand the slot, and so
-/// the ASID, to a new task while stale translations for it remain.
-pub fn retire_current(reason: u64) {
+/// the ASID, to a new task while stale translations for it remain. The
+/// registry and init hear of the exit in the same masked step, so no spawn
+/// can reuse the slot before the old task's exit is recorded.
+///
+/// init's own exit halts the system: nothing is left to supervise it.
+pub fn retire_current(reason: ExitReason) {
     let _irq = super::IrqGuard::mask();
     let cur = CURRENT.load(Ordering::SeqCst);
     if cur == 0 {
         return;
+    }
+    if cur == INIT_TASK.load(Ordering::SeqCst) {
+        serial_println!(
+            "init exited ({}): nothing supervises the system — halting",
+            reason.as_str()
+        );
+        loop {
+            super::interrupt_disable();
+            super::halt();
+        }
     }
     let t = unsafe { &mut *tasks() };
     // An exiting task is never returned to, and never returns to its sender
@@ -573,23 +620,41 @@ pub fn retire_current(reason: u64) {
     if let Some(wait) = t[cur].wait.take() {
         crate::ipc::cancel_waiter(wait.channel, cur);
     }
+    // Receive rights go home; messages queued meanwhile wait for the next
+    // receiver. A right with no home leaves the channel without a receiver.
+    let handles = t[cur].handles;
+    for (_, slot) in handles.slots() {
+        if !slot.rights.contains(Rights::RECV) {
+            continue;
+        }
+        if let Some((home, home_slot)) = crate::ipc::receiver_exited(slot.channel, cur)
+            && home < MAX_TASKS
+            && home != cur
+            && let Some(home_slot) = t[home].handles.get_mut(Handle(home_slot))
+            && home_slot.channel == slot.channel
+        {
+            home_slot.rights = home_slot.rights.union(Rights::RECV);
+        }
+    }
     // Never keep running on a table that is about to be freed.
     activate(KERNEL_TTBR0.load(Ordering::SeqCst));
     drop(t[cur].space.take());
     queue_pending_free(t[cur].kernel_stack_bottom, t[cur].kernel_stack_pages);
     t[cur] = EMPTY_TASK;
     COUNT.store(task_count(), Ordering::SeqCst);
-    crate::init_abi::task_exited(cur, reason);
+    crate::registry::on_exit(cur, reason);
+    let _ = crate::ipc::send_as_kernel(
+        crate::ipc::INIT_INBOX,
+        &Message::new(freshos_abi::tag::TASK_EXITED)
+            .with_data(0, cur as u64)
+            .with_data(1, reason as u64),
+    );
 }
 
-pub fn terminate_current_with_reason(reason: u64) -> ! {
+pub fn terminate_current(reason: ExitReason) -> ! {
     retire_current(reason);
     loop {
         super::interrupt_enable();
         super::halt();
     }
-}
-
-pub fn terminate_current() -> ! {
-    terminate_current_with_reason(crate::init_abi::SERVICE_EXIT_FAULT)
 }

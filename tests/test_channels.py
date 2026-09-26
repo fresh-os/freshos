@@ -1,5 +1,3 @@
-import unittest
-
 from harness import FreshOSTestCase
 
 # probe-chan logs "[test] <case> result=<refused|ok> code=<n>". Expected codes
@@ -29,7 +27,6 @@ class ChannelTest(FreshOSTestCase):
             with self.subTest(case=case):
                 self.assertEqual(self.result(case), code)
 
-    @unittest.expectedFailure  # Task 7 adds SPAWN; remove this marker then.
     def test_spawn_is_refused_outside_init(self) -> None:
         self.assertEqual(self.result("spawn-not-init"), -8)  # NotPermitted
 

@@ -17,8 +17,9 @@ mod handles;
 mod heap;
 pub mod ipc;
 mod metrics;
+#[cfg(target_arch = "aarch64")]
+mod registry;
 mod serial;
-mod task_names;
 
 // Rhai scripting
 mod scripting;
@@ -26,8 +27,6 @@ mod scripting;
 // aarch64 userspace tasks (EL0)
 #[cfg(target_arch = "aarch64")]
 mod arm_tasks;
-#[cfg(target_arch = "aarch64")]
-mod init_abi;
 #[cfg(target_arch = "aarch64")]
 mod mcp;
 #[cfg(target_arch = "aarch64")]
@@ -296,10 +295,7 @@ fn main() -> Status {
     // ---- IPC channels ----
     let _ = ipc::create().expect("ch0: kbd events");
     let _ = ipc::create().expect("ch1: shell keys");
-    let _ = ipc::create().expect("ch2: probe ping");
-    let _ = ipc::create().expect("ch3: probe pong");
-    let _ = ipc::create().expect("ch4: probe sink");
-    let _ = ipc::create().expect("ch5: probe-chan own");
+    let _ = ipc::create().expect("ch2: init inbox");
     serial_println!("  {} IPC channels", ipc::channel_count());
 
     // ---- Scheduler: spawn tasks ----
@@ -310,29 +306,25 @@ fn main() -> Status {
     // path and EL0 infrastructure already exist.
     arch::context::init(ttbr0);
 
-    let loaded_init = boot_images::find("INIT.ELF").and_then(|bytes| {
-        match elf::load_image(bytes) {
-            Ok(image) => {
-                arch::paging::make_executable(image.base, image.size as u64);
-                serial_println!(
-                    "  Init ELF loaded: base={:#x} size={} entry={:#x}",
-                    image.base,
-                    image.size,
-                    image.entry
-                );
-                Some(image)
-            }
-            Err(err) => {
-                serial_println!("  Init ELF load failed: {}", err);
-                None
-            }
-        }
-    });
-
-    if let Some(image) = loaded_init {
-        arch::context::spawn_with_arg(image.entry, init_abi::api_ptr() as u64);
-    } else {
+    // The kernel starts only init (decision 0006), with RECV on its inbox.
+    // Every other service is init's to start.
+    let Some(init_image) = boot_images::find("INIT.ELF") else {
         serial_println!("INIT.ELF missing from \\EFI\\FreshOS — nothing to run");
+        loop {
+            arch::interrupt_disable();
+            arch::halt();
+        }
+    };
+    let mut init_handles = handles::HandleTable::EMPTY;
+    let _ = init_handles
+        .insert(handles::Slot { channel: ipc::INIT_INBOX, rights: freshos_abi::Rights::RECV });
+    let bind = |id: usize| {
+        arch::context::set_init_task(id);
+        ipc::set_receiver(ipc::INIT_INBOX, id);
+        registry::on_spawn(id, b"init");
+    };
+    if let Err(err) = arch::context::spawn_el0(init_image, init_handles, 1, 0, bind) {
+        serial_println!("INIT.ELF won't start: {:?} — nothing to run", err);
         loop {
             arch::interrupt_disable();
             arch::halt();

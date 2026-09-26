@@ -32,21 +32,21 @@ impl HandleTable {
         }
     }
 
+    pub fn is_full(&self) -> bool {
+        self.slots.iter().all(Option::is_some)
+    }
+
     pub fn insert(&mut self, slot: Slot) -> Result<Handle, Error> {
         let index = self.slots.iter().position(Option::is_none).ok_or(Error::TableFull)?;
         self.slots[index] = Some(slot);
         Ok(Handle(index as u32))
     }
 
-    // SPAWN (EL0 isolation plan, Task 7) is the first caller.
-    #[allow(dead_code)]
     pub fn get_mut(&mut self, handle: Handle) -> Option<&mut Slot> {
         self.slots.get_mut(handle.0 as usize).and_then(Option::as_mut)
     }
 
     /// Every occupied slot, as (slot index, slot).
-    // SPAWN (EL0 isolation plan, Task 7) is the first caller.
-    #[allow(dead_code)]
     pub fn slots(&self) -> impl Iterator<Item = (u32, Slot)> + '_ {
         self.slots.iter().enumerate().filter_map(|(i, s)| s.map(|s| (i as u32, s)))
     }

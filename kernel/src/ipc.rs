@@ -36,6 +36,12 @@ pub const MSG_KEY_UP: u32 = freshos_abi::tag::KEY_UP;
 const MAX_CHANNELS: usize = 32;
 const CHANNEL_CAP: usize = 16;
 
+/// Channels the kernel creates at boot, in this order. Everything else is
+/// created by init.
+pub const KBD_EVENTS: u32 = 0;
+pub const SHELL_KEYS: u32 = 1;
+pub const INIT_INBOX: u32 = 2;
+
 #[derive(Clone, Copy)]
 struct Queued {
     msg: Message,
@@ -53,6 +59,9 @@ struct Channel {
     waiter: Option<usize>, // task blocked on recv
     consumer: u16,         // last task to recv on this channel (0xFFFF = none yet)
     receiver: u16,         // task holding RECV on this channel (0xFFFF = none)
+    /// Where RECV returns when `receiver` exits: the task and handle slot it
+    /// was moved from by spawn. None when the receiver holds it natively.
+    recv_home: Option<(u16, u32)>,
 }
 
 const EMPTY_CHANNEL: Channel = Channel {
@@ -64,6 +73,7 @@ const EMPTY_CHANNEL: Channel = Channel {
     waiter: None,
     consumer: 0xFFFF,
     receiver: 0xFFFF,
+    recv_home: None,
 };
 
 struct ChannelsCell(UnsafeCell<[Channel; MAX_CHANNELS]>);
@@ -75,6 +85,47 @@ static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 fn channels() -> *mut [Channel; MAX_CHANNELS] {
     CHANNELS.0.get()
 }
+
+/// Kernel notices waiting for room in a full channel, oldest first. Only
+/// touched with IRQs masked. Sized for one exit notice per task slot, twice
+/// over: init has at most one instance of each service in flight.
+const BACKLOG_CAP: usize = 32;
+
+struct Backlog {
+    entries: [(u32, Message); BACKLOG_CAP],
+    len: usize,
+}
+
+impl Backlog {
+    fn pending(&self, channel_id: u32) -> bool {
+        self.entries[..self.len].iter().any(|(c, _)| *c == channel_id)
+    }
+
+    fn push(&mut self, channel_id: u32, message: Message) -> bool {
+        if self.len == BACKLOG_CAP {
+            return false;
+        }
+        self.entries[self.len] = (channel_id, message);
+        self.len += 1;
+        true
+    }
+
+    fn pop(&mut self, channel_id: u32) -> Option<Message> {
+        let index = self.entries[..self.len].iter().position(|(c, _)| *c == channel_id)?;
+        let (_, message) = self.entries[index];
+        self.entries.copy_within(index + 1..self.len, index);
+        self.len -= 1;
+        Some(message)
+    }
+}
+
+struct BacklogCell(UnsafeCell<Backlog>);
+unsafe impl Sync for BacklogCell {}
+
+static BACKLOG: BacklogCell = BacklogCell(UnsafeCell::new(Backlog {
+    entries: [(0, Message::empty()); BACKLOG_CAP],
+    len: 0,
+}));
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -110,6 +161,33 @@ pub fn create() -> Result<u32, Error> {
 /// into its buffer and `Some(task)` is returned: that task is ready, and the
 /// caller may run it next.
 pub fn send(channel_id: u32, msg: &Message) -> Result<Option<usize>, Error> {
+    send_from(crate::arch::current_task() as u16, channel_id, msg)
+}
+
+/// Send as the kernel itself (sender 0), e.g. TASK_EXITED. A kernel notice
+/// is never lost to a full queue: it waits in the kernel's backlog, and moves
+/// into the channel, in order, as the receiver makes room.
+pub fn send_as_kernel(channel_id: u32, msg: &Message) -> Result<Option<usize>, Error> {
+    let _irq = crate::arch::IrqGuard::mask();
+    let ch = channel_mut(channel_id)?;
+    let backlog = unsafe { &mut *BACKLOG.0.get() };
+    if ch.count >= CHANNEL_CAP || backlog.pending(channel_id) {
+        let mut stamped = *msg;
+        stamped.sender = 0;
+        if backlog.push(channel_id, stamped) {
+            return Ok(None);
+        }
+        crate::serial::serial_println!(
+            "ipc: kernel backlog full; notice tag {} on channel {} lost",
+            msg.tag,
+            channel_id
+        );
+        return Err(Error::Full);
+    }
+    send_from(0, channel_id, msg)
+}
+
+fn send_from(sender: u16, channel_id: u32, msg: &Message) -> Result<Option<usize>, Error> {
     // Built-ins send with IRQs enabled. Delivery must not interleave with a
     // tick's deadline expiry, or a message could be dequeued for a wait that
     // has just timed out, and lost.
@@ -140,7 +218,7 @@ pub fn send(channel_id: u32, msg: &Message) -> Result<Option<usize>, Error> {
 
     // The kernel decides who sent a message, never the sender (spec §4).
     let mut stamped = *msg;
-    stamped.sender = crate::arch::current_task() as u16;
+    stamped.sender = sender;
     ch.buf[ch.head] = Queued { msg: stamped, sent_ns: now_ns };
     ch.head = (ch.head + 1) % CHANNEL_CAP;
     ch.count += 1;
@@ -148,7 +226,7 @@ pub fn send(channel_id: u32, msg: &Message) -> Result<Option<usize>, Error> {
     // Trace this message
     trace_record(TraceEntry {
         timestamp_ns: now_ns,
-        from_task: crate::arch::current_task() as u16,
+        from_task: sender,
         to_task: receiver as u16,
         channel: channel_id as u16,
         tag: msg.tag as u16,
@@ -240,7 +318,24 @@ pub fn try_recv(channel_id: u32) -> Option<Message> {
 pub fn try_dequeue(channel_id: u32) -> Result<Option<Message>, Error> {
     let ch = channel_mut(channel_id)?;
     ch.consumer = crate::arch::current_task() as u16;
-    Ok(dequeue(ch))
+    let message = dequeue(ch);
+    if message.is_some() {
+        refill_from_backlog(channel_id);
+    }
+    Ok(message)
+}
+
+/// The receiver made room: move waiting kernel notices into the channel.
+fn refill_from_backlog(channel_id: u32) {
+    let backlog = unsafe { &mut *BACKLOG.0.get() };
+    while backlog.pending(channel_id) {
+        let Ok(ch) = channel_mut(channel_id) else { return };
+        if ch.count >= CHANNEL_CAP {
+            return;
+        }
+        let Some(message) = backlog.pop(channel_id) else { return };
+        let _ = send_from(0, channel_id, &message);
+    }
 }
 
 /// Record `task` as waiting on `channel_id` (it must hold the channel's RECV).
@@ -258,10 +353,50 @@ pub fn cancel_waiter(channel_id: u32, task: usize) {
     }
 }
 
-/// The task holding RECV on `channel_id`, for attribution.
+/// `task` holds RECV on `channel_id` natively (it created the channel, or the
+/// kernel gave it the right at boot).
 pub fn set_receiver(channel_id: u32, task: usize) {
     if let Ok(ch) = channel_mut(channel_id) {
         ch.receiver = task as u16;
+        ch.recv_home = None;
+    }
+}
+
+/// `task` now holds RECV on `channel_id`, moved from `home_task`'s slot `home_slot`.
+pub fn set_receiver_with_home(channel_id: u32, task: usize, home_task: usize, home_slot: u32) {
+    if let Ok(ch) = channel_mut(channel_id) {
+        ch.receiver = task as u16;
+        ch.recv_home = Some((home_task as u16, home_slot));
+    }
+}
+
+/// The receiver of `channel_id`, if any.
+pub fn receiver(channel_id: u32) -> Option<usize> {
+    channel_mut(channel_id)
+        .ok()
+        .and_then(|ch| (ch.receiver != 0xFFFF).then_some(ch.receiver as usize))
+}
+
+/// `task`, the receiver of `channel_id`, exited. Queued messages stay; the
+/// right goes back to where it came from. Returns that home (task, slot), or
+/// None if the right had no home, in which case the channel has no receiver.
+pub fn receiver_exited(channel_id: u32, task: usize) -> Option<(usize, u32)> {
+    let ch = channel_mut(channel_id).ok()?;
+    if ch.receiver != task as u16 {
+        return None;
+    }
+    if ch.waiter == Some(task) {
+        ch.waiter = None;
+    }
+    match ch.recv_home.take() {
+        Some((home_task, home_slot)) => {
+            ch.receiver = home_task;
+            Some((home_task as usize, home_slot))
+        }
+        None => {
+            ch.receiver = 0xFFFF;
+            None
+        }
     }
 }
 

@@ -4,22 +4,11 @@
 /// space (see `addrspace`, which builds each EL0 task's own table from it).
 /// `init` sets up the system registers for that: WXN off, PAN on, and the
 /// ASID taken from TTBR0.
-///
-/// `make_executable` edits the firmware's leaf entries in place so built-in
-/// services loaded at EL1 can run. The architecture doesn't require
-/// break-before-make for permission-only changes, but the TLB may still hold
-/// the old permissions, so every batch of edits ends with a TLB invalidation
-/// (`flush_tlb`).
 use crate::serial::serial_println;
 
-const VALID: u64 = 1 << 0;
-const TABLE: u64 = 1 << 1;
-const PXN: u64 = 1 << 53;
-const PXN_TABLE: u64 = 1 << 59;
 const ADDR_MASK: u64 = 0x0000_FFFF_FFFF_F000;
 
 static mut TTBR0_ROOT: u64 = 0;
-static mut START_LEVEL: u32 = 1;
 
 /// Turn WXN off and PAN on (where the CPU has it), clear TCR.A1, and hand the firmware's table to
 /// `addrspace`.
@@ -42,7 +31,6 @@ pub unsafe fn init() -> u64 {
 
     unsafe {
         TTBR0_ROOT = ttbr0 & ADDR_MASK;
-        START_LEVEL = if t0sz >= 25 { 1 } else { 0 };
     }
 
     // PAN (FEAT_PAN, ARMv8.1) makes the kernel fault if it ever touches EL0
@@ -102,25 +90,6 @@ pub unsafe fn init() -> u64 {
     ttbr0
 }
 
-pub fn make_executable(start: u64, size: u64) {
-    if size == 0 {
-        return;
-    }
-
-    let root = unsafe { TTBR0_ROOT };
-    let level = unsafe { START_LEVEL };
-    let end = start + size;
-
-    let mut addr = start & !0xFFF;
-    while addr < end {
-        clear_xn_leaf_entry(root, level, addr);
-        addr += 4096;
-    }
-
-    flush_tlb();
-    sync_icache(start, size);
-}
-
 /// Make code just written through the data side at `[start, start + len)`
 /// (a kernel VA: the identity map) visible to instruction fetch: clean the
 /// D-cache to the point of unification by line, then invalidate the whole
@@ -144,67 +113,5 @@ pub fn sync_icache(start: u64, len: u64) {
     }
     unsafe {
         core::arch::asm!("dsb ish", "ic ialluis", "dsb ish", "isb", options(nostack));
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Page table walker — find and patch a single leaf entry
-// ---------------------------------------------------------------------------
-
-fn clear_xn_leaf_entry(table: u64, level: u32, va: u64) -> bool {
-    let shift = match level {
-        0 => 39,
-        1 => 30,
-        2 => 21,
-        3 => 12,
-        _ => return false,
-    };
-    let index = ((va >> shift) & 0x1FF) as usize;
-    let entry = read_entry(table, index);
-
-    if entry & VALID == 0 {
-        return false;
-    }
-
-    let is_table = (entry & TABLE) != 0 && level < 3;
-    if is_table {
-        let table_entry = entry & !PXN_TABLE;
-        if table_entry != entry {
-            write_entry(table, index, table_entry);
-        }
-        let next = entry & ADDR_MASK;
-        return clear_xn_leaf_entry(next, level + 1, va);
-    }
-
-    // PXN only: the image runs at EL1, and must stay non-executable at EL0.
-    let new_entry = entry & !PXN;
-    if new_entry == entry {
-        return false;
-    }
-
-    write_entry(table, index, new_entry);
-    true
-}
-
-/// Make page-table edits visible: order the writes before the invalidation,
-/// drop every EL1&0 translation, then wait for it to complete.
-///
-/// Older QEMU hung the guest on any `tlbi` under HVF; QEMU 11 runs it and it
-/// invalidates correctly (verified 2026-09-25: a remapped page kept its stale
-/// translation until `tlbi`).
-fn flush_tlb() {
-    unsafe {
-        core::arch::asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb", options(nostack));
-    }
-}
-
-fn read_entry(table_phys: u64, index: usize) -> u64 {
-    unsafe { *((table_phys as *const u64).add(index)) }
-}
-
-fn write_entry(table_phys: u64, index: usize, value: u64) {
-    unsafe {
-        let ptr = (table_phys as *mut u64).add(index);
-        ptr.write_volatile(value);
     }
 }

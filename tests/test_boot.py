@@ -1,7 +1,7 @@
 from harness import FreshOSTestCase
 
 # Services that stay running once booted. pulse and fault come and go by design.
-LONG_RUNNING = ("kbd", "comp", "shell", "dash", "ping", "pong", "mcp")
+LONG_RUNNING = ("init", "kbd", "comp", "shell", "dash", "ping", "pong", "mcp")
 
 
 class BootTest(FreshOSTestCase):

@@ -184,11 +184,21 @@ class Boot:
         with self._cond:
             return [m for line in self.lines if (m := regex.search(line))]
 
-    def send_keys(self, text: str) -> None:
-        """Type into the console UART, which the in-kernel keyboard driver reads."""
+    def send_keys(self, text: str, interval: float = 0.03) -> None:
+        """Type into the console UART, which the in-kernel keyboard driver reads.
+
+        Keys go one at a time, `interval` seconds apart, the way a person
+        types. The keyboard driver queues each key on a 16-event channel that
+        the compositor drains once per frame, so a burst longer than that
+        loses keys (a 19-byte command lost its Enter). The bytes do reach the
+        guest's serial0, not QEMU's monitor: -serial mon:stdio only diverts
+        input after a Ctrl-A, which tests never send.
+        """
         assert self.proc is not None and self.proc.stdin is not None
-        self.proc.stdin.write(text.encode())
-        self.proc.stdin.flush()
+        for byte in text.encode():
+            self.proc.stdin.write(bytes([byte]))
+            self.proc.stdin.flush()
+            time.sleep(interval)
 
     def mcp(self) -> McpClient:
         if self._mcp is None:

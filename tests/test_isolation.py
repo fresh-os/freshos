@@ -6,16 +6,16 @@ class IsolationTest(FreshOSTestCase):
         self.boot.wait_for_log(r"task \d+ el0 asid=\d+ entry=0x4000", timeout=20)
 
     def test_fault_is_contained_and_restarted(self) -> None:
-        self.boot.wait_for_log(r"service fault exited \(task \d+, reason=fault\)", timeout=20)
+        self.boot.wait_for_log(r"\[init\] fault exited \(fault\)", timeout=20)
         self.wait_until(
-            lambda: len(self.boot.find_logs(r"service fault exited")) >= 2,
+            lambda: len(self.boot.find_logs(r"\[init\] fault exited \(fault\)")) >= 2,
             timeout=20,
             message="fault to crash twice (restarted in between)",
         )
         self.assertTrue(self.services()["pong"]["running"])
 
     def test_forbidden_memory_access_is_a_contained_fault(self) -> None:
-        probes = ("probe-bad-kernel", "probe-bad-unmapped", "probe-bad-code", "probe-bad-stack")
+        probes = ("probe-bad-kernel", "probe-bad-unmap", "probe-bad-code", "probe-bad-stack")
 
         def all_faulted() -> bool:
             services = self.services()
