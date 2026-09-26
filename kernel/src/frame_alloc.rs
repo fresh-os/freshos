@@ -7,6 +7,11 @@
 /// This is intentionally simple: a flat bitmap scanned linearly with a
 /// next-free hint. Good enough for early boot. The real allocator will
 /// come when we have a proper kernel heap.
+///
+/// Tasks are preemptible, and the scheduler frees frames from the timer tick,
+/// so every operation after `init` runs with IRQs masked (`arch::IrqGuard`),
+/// like the heap's. Otherwise two allocations could hand out the same frame,
+/// or a free could be lost in a bitmap byte's read-modify-write.
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -74,6 +79,7 @@ pub unsafe fn init(regions: &[MemRegion], count: usize) {
 
 /// Allocate a single 4 KiB frame. Returns the physical address, or `None`.
 pub fn allocate() -> Option<u64> {
+    let _irq = crate::arch::IrqGuard::mask();
     let hint = NEXT_HINT.load(Ordering::Relaxed);
 
     for offset in 0..BITMAP_BYTES {
@@ -101,6 +107,7 @@ pub fn allocate() -> Option<u64> {
 /// # Safety
 /// Frame must have been returned by `allocate()` and must not be in use.
 pub unsafe fn deallocate(phys: u64) {
+    let _irq = crate::arch::IrqGuard::mask();
     let frame = (phys / FRAME_SIZE) as usize;
     if frame == 0 || frame >= MAX_FRAMES {
         return;
@@ -119,6 +126,7 @@ pub unsafe fn deallocate_contiguous(base: u64, count: usize) {
     if count == 0 {
         return;
     }
+    let _irq = crate::arch::IrqGuard::mask();
     for offset in 0..count {
         unsafe { deallocate(base + offset as u64 * FRAME_SIZE) };
     }
@@ -129,6 +137,7 @@ pub fn allocate_contiguous(count: usize) -> Option<u64> {
     if count == 0 {
         return None;
     }
+    let _irq = crate::arch::IrqGuard::mask();
     let mut run_start: usize = 1; // skip frame 0
     let mut run_len: usize = 0;
 

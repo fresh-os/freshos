@@ -84,6 +84,12 @@ pub struct AddressSpace {
 }
 
 impl AddressSpace {
+    /// A new space with the kernel's mappings and an empty user window.
+    ///
+    /// This snapshots the kernel's top-level (L1) entries. Changes the kernel
+    /// makes later below L1 are shared, because the lower tables are, but a
+    /// later change to an L1 entry itself doesn't reach spaces that already
+    /// exist.
     pub fn new(asid: u16) -> Result<Self, SpaceError> {
         let mut space = AddressSpace { l1: 0, asid, frames: Vec::new() };
         space.l1 = space.alloc_zeroed()?;

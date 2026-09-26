@@ -27,6 +27,9 @@ const KERNEL_STACK_SIZE: usize = 4096 * 4; // 16 KiB kernel stack per task
 #[derive(Clone, Copy, PartialEq)]
 enum State {
     Free,
+    /// Claimed by a spawn that is still building the task. The scheduler
+    /// never runs it, and no other spawn can take it.
+    Reserved,
     Ready,
     Running,
     Blocked,
@@ -98,8 +101,34 @@ fn activate(ttbr0: u64) {
     }
 }
 
-fn free_slot(t: &[Task; MAX_TASKS]) -> Option<usize> {
-    (1..MAX_TASKS).find(|&id| t[id].state == State::Free)
+/// Claim a free slot for a spawn. The claim is made with IRQs masked, so two
+/// spawns (say, init restarting a service while the shell starts another)
+/// can never pick the same slot. The spawn then fills the slot with
+/// `install`, or gives it back with `release`.
+fn claim_slot() -> Option<usize> {
+    let _irq = super::IrqGuard::mask();
+    let t = unsafe { &mut *tasks() };
+    let id = (1..MAX_TASKS).find(|&id| t[id].state == State::Free)?;
+    t[id].state = State::Reserved;
+    Some(id)
+}
+
+/// Give back a slot claimed by `claim_slot` whose spawn failed.
+fn release(id: usize) {
+    let _irq = super::IrqGuard::mask();
+    let t = unsafe { &mut *tasks() };
+    debug_assert!(t[id].state == State::Reserved);
+    t[id] = EMPTY_TASK;
+}
+
+/// Fill a claimed slot with a ready task, in one step the scheduler can't
+/// interrupt.
+fn install(id: usize, task: Task) {
+    let _irq = super::IrqGuard::mask();
+    let t = unsafe { &mut *tasks() };
+    debug_assert!(t[id].state == State::Reserved);
+    t[id] = task;
+    COUNT.store(task_count(), Ordering::SeqCst);
 }
 
 fn queue_pending_free(bottom: u64, pages: usize) {
@@ -123,6 +152,9 @@ fn queue_pending_free(bottom: u64, pages: usize) {
 }
 
 fn reap_pending_frees(current_stack_ptr: u64) {
+    // Spawns reap too, from preemptible tasks; a tick mid-reap must not free
+    // the same stack twice.
+    let _irq = super::IrqGuard::mask();
     let pending = unsafe { &mut *pending_frees() };
     for slot in pending.iter_mut() {
         if !slot.used {
@@ -223,8 +255,7 @@ pub fn spawn(entry: fn() -> !) -> usize {
 
 pub fn spawn_with_arg(entry_addr: u64, arg0: u64) -> usize {
     reap_pending_frees(0);
-    let t = unsafe { &mut *tasks() };
-    let id = free_slot(t).expect("too many tasks");
+    let id = claim_slot().expect("too many tasks");
 
     let stack_bottom =
         frame_alloc::allocate_contiguous(KERNEL_STACK_SIZE / 4096).expect("task stack");
@@ -240,15 +271,17 @@ pub fn spawn_with_arg(entry_addr: u64, arg0: u64) -> usize {
         *slots.add(33) = 0x0000_0005; // SPSR: EL1h, IRQs enabled
     }
 
-    t[id] = Task {
-        sp: frame_base,
-        kernel_stack_bottom: stack_bottom,
-        kernel_stack_pages: KERNEL_STACK_SIZE / 4096,
-        ttbr0: KERNEL_TTBR0.load(Ordering::SeqCst),
-        state: State::Ready,
-        ..EMPTY_TASK
-    };
-    COUNT.store(task_count(), Ordering::SeqCst);
+    install(
+        id,
+        Task {
+            sp: frame_base,
+            kernel_stack_bottom: stack_bottom,
+            kernel_stack_pages: KERNEL_STACK_SIZE / 4096,
+            ttbr0: KERNEL_TTBR0.load(Ordering::SeqCst),
+            state: State::Ready,
+            ..EMPTY_TASK
+        },
+    );
 
     serial_println!(
         "    task {} @ {:#x}, stack {:#x}..{:#x}",
@@ -272,9 +305,24 @@ pub enum SpawnError {
 /// `main` as the handle count and the service's argument).
 pub fn spawn_el0(image: &[u8], arg0: u64, arg1: u64) -> Result<usize, SpawnError> {
     reap_pending_frees(0);
-    let t = unsafe { &mut *tasks() };
-    let id = free_slot(t).ok_or(SpawnError::NoSlot)?;
+    let id = claim_slot().ok_or(SpawnError::NoSlot)?;
+    match build_el0(id, image, arg0, arg1) {
+        Ok((task, entry)) => {
+            install(id, task);
+            serial_println!("    task {} el0 asid={} entry={:#x}", id, id, entry);
+            Ok(id)
+        }
+        Err(err) => {
+            release(id);
+            Err(err)
+        }
+    }
+}
 
+/// Build the task for slot `id` (claimed, so its ASID is ours). On error,
+/// everything allocated here is freed: the space by its drop, and the
+/// kernel stack is allocated last.
+fn build_el0(id: usize, image: &[u8], arg0: u64, arg1: u64) -> Result<(Task, u64), SpawnError> {
     // The ASID is the task slot: unique among live tasks, and flushed when
     // the space is dropped, before the slot can be reused.
     let mut space = AddressSpace::new(id as u16).map_err(|_| SpawnError::OutOfMemory)?;
@@ -307,7 +355,7 @@ pub fn spawn_el0(image: &[u8], arg0: u64, arg1: u64) -> Result<usize, SpawnError
     }
 
     let ttbr0 = space.ttbr0();
-    t[id] = Task {
+    let task = Task {
         sp: frame_base,
         kernel_stack_bottom,
         kernel_stack_pages: KERNEL_STACK_SIZE / 4096,
@@ -315,9 +363,7 @@ pub fn spawn_el0(image: &[u8], arg0: u64, arg1: u64) -> Result<usize, SpawnError
         space: Some(space),
         state: State::Ready,
     };
-    COUNT.store(task_count(), Ordering::SeqCst);
-    serial_println!("    task {} el0 asid={} entry={:#x}", id, id, entry);
-    Ok(id)
+    Ok((task, entry))
 }
 
 /// Start the scheduler: enable the timer and interrupts.
@@ -337,7 +383,7 @@ pub fn task_count() -> usize {
     let t = unsafe { &*tasks() };
     let mut count = 0;
     for task in t.iter() {
-        if task.state != State::Free {
+        if !matches!(task.state, State::Free | State::Reserved) {
             count += 1;
         }
     }
@@ -366,23 +412,29 @@ pub fn unblock(task_id: usize) {
     }
 }
 
-/// Remove the current task: record its exit, free its address space, and
-/// queue its kernel stack. The caller is still running on that stack and
-/// must switch away (a syscall returns through the scheduler; a fault waits
-/// for the next tick).
+/// Remove the current task: free its address space, queue its kernel stack,
+/// free its slot, and record its exit. The caller is still running on that
+/// stack and must switch away (a syscall returns through the scheduler; a
+/// fault waits for the next tick).
+///
+/// The order matters, and the whole body runs with IRQs masked: the slot
+/// only becomes Free after TTBR0 has left the space and the space's ASID has
+/// been flushed (by its drop). Otherwise a tick could hand the slot, and so
+/// the ASID, to a new task while stale translations for it remain.
 pub fn retire_current(reason: u64) {
+    let _irq = super::IrqGuard::mask();
     let cur = CURRENT.load(Ordering::SeqCst);
     if cur == 0 {
         return;
     }
     let t = unsafe { &mut *tasks() };
-    let mut task = core::mem::replace(&mut t[cur], EMPTY_TASK);
     // Never keep running on a table that is about to be freed.
     activate(KERNEL_TTBR0.load(Ordering::SeqCst));
-    drop(task.space.take());
-    queue_pending_free(task.kernel_stack_bottom, task.kernel_stack_pages);
-    crate::init_abi::task_exited(cur, reason);
+    drop(t[cur].space.take());
+    queue_pending_free(t[cur].kernel_stack_bottom, t[cur].kernel_stack_pages);
+    t[cur] = EMPTY_TASK;
     COUNT.store(task_count(), Ordering::SeqCst);
+    crate::init_abi::task_exited(cur, reason);
 }
 
 pub fn terminate_current_with_reason(reason: u64) -> ! {

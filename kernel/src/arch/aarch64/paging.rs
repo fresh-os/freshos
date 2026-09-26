@@ -15,15 +15,13 @@ use crate::serial::serial_println;
 const VALID: u64 = 1 << 0;
 const TABLE: u64 = 1 << 1;
 const PXN: u64 = 1 << 53;
-const UXN: u64 = 1 << 54;
 const PXN_TABLE: u64 = 1 << 59;
-const UXN_TABLE: u64 = 1 << 60;
 const ADDR_MASK: u64 = 0x0000_FFFF_FFFF_F000;
 
 static mut TTBR0_ROOT: u64 = 0;
 static mut START_LEVEL: u32 = 1;
 
-/// Turn WXN off and PAN on, clear TCR.A1, and hand the firmware's table to
+/// Turn WXN off and PAN on (where the CPU has it), clear TCR.A1, and hand the firmware's table to
 /// `addrspace`.
 ///
 /// Returns the current TTBR0 (unchanged).
@@ -47,21 +45,40 @@ pub unsafe fn init() -> u64 {
         START_LEVEL = if t0sz >= 25 { 1 } else { 0 };
     }
 
-    // WXN off (writable pages stay executable where the firmware said so);
-    // SPAN off, so PAN is set on every exception entry to EL1.
+    // PAN (FEAT_PAN, ARMv8.1) makes the kernel fault if it ever touches EL0
+    // memory directly. The Pi 4's Cortex-A72 is ARMv8.0 and lacks it: there,
+    // `msr PAN` is UNDEFINED and SCTLR.SPAN is RES1, so neither may be
+    // touched. On such a CPU the rule "the kernel never dereferences a user
+    // VA" rests on the copy_*_user discipline alone (see `addrspace`).
+    let mmfr1: u64;
+    unsafe {
+        core::arch::asm!("mrs {}, ID_AA64MMFR1_EL1", out(reg) mmfr1, options(nomem, nostack));
+    }
+    let has_pan = (mmfr1 >> 20) & 0xF != 0;
+
+    // WXN off (writable pages stay executable where the firmware said so).
+    // With PAN: SPAN off, so PAN is set on every exception entry to EL1.
     let mut sctlr: u64;
     unsafe {
         core::arch::asm!("mrs {}, SCTLR_EL1", out(reg) sctlr, options(nomem, nostack));
     }
     sctlr &= !(1 << 19); // WXN=0
-    sctlr &= !(1 << 23); // SPAN=0
+    if has_pan {
+        sctlr &= !(1 << 23); // SPAN=0
+    }
     unsafe {
         core::arch::asm!("msr SCTLR_EL1, {}", in(reg) sctlr, options(nomem, nostack));
         core::arch::asm!("isb", options(nomem, nostack));
+    }
+    if has_pan {
         // PSTATE.PAN = 1 ("msr PAN, #1", encoded because the assembler may not
-        // know PAN): the kernel faults if it ever touches EL0 memory directly.
-        core::arch::asm!(".inst 0xd500419f", options(nomem, nostack));
-        core::arch::asm!("isb", options(nomem, nostack));
+        // know PAN).
+        unsafe {
+            core::arch::asm!(".inst 0xd500419f", options(nomem, nostack));
+            core::arch::asm!("isb", options(nomem, nostack));
+        }
+    } else {
+        serial_println!("[paging] PAN unavailable (ARMv8.0); user-copy discipline only");
     }
 
     // TCR_EL1.A1 = 0: the ASID comes from TTBR0, where each task's lives.
@@ -77,8 +94,9 @@ pub unsafe fn init() -> u64 {
     }
 
     serial_println!(
-        "  Paging: T0SZ={}, WXN off, PAN on, user window {:#x}",
+        "  Paging: T0SZ={}, WXN off, PAN {}, user window {:#x}",
         t0sz,
+        if has_pan { "on" } else { "unavailable" },
         freshos_abi::USER_BASE
     );
     ttbr0
@@ -100,16 +118,34 @@ pub fn make_executable(start: u64, size: u64) {
     }
 
     flush_tlb();
-    unsafe {
-        core::arch::asm!("ic iallu", options(nomem, nostack));
-        core::arch::asm!("dsb ish", options(nomem, nostack));
-        core::arch::asm!("isb", options(nomem, nostack));
-    }
+    sync_icache(start, size);
 }
 
-/// No-op — all tasks share UEFI's page tables.
-#[inline]
-pub fn switch_ttbr0(_: u64) {}
+/// Make code just written through the data side at `[start, start + len)`
+/// (a kernel VA: the identity map) visible to instruction fetch: clean the
+/// D-cache to the point of unification by line, then invalidate the whole
+/// I-cache. Apple cores are coherent (so HVF never needed this); the Pi 4's
+/// Cortex-A72 is not, and would otherwise fetch stale instructions,
+/// especially from a reused frame. `ic ialluis` rather than `ic ivau`, so
+/// no I-cache alias of the frame can survive.
+pub fn sync_icache(start: u64, len: u64) {
+    if len == 0 {
+        return;
+    }
+    // CTR_EL0.DminLine (bits 19:16): log2 of the smallest D-cache line, in words.
+    let ctr: u64;
+    unsafe { core::arch::asm!("mrs {}, CTR_EL0", out(reg) ctr, options(nomem, nostack)) };
+    let line = 4u64 << ((ctr >> 16) & 0xF);
+    let end = start + len;
+    let mut addr = start & !(line - 1);
+    while addr < end {
+        unsafe { core::arch::asm!("dc cvau, {}", in(reg) addr, options(nostack)) };
+        addr += line;
+    }
+    unsafe {
+        core::arch::asm!("dsb ish", "ic ialluis", "dsb ish", "isb", options(nostack));
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Page table walker — find and patch a single leaf entry
@@ -132,7 +168,7 @@ fn clear_xn_leaf_entry(table: u64, level: u32, va: u64) -> bool {
 
     let is_table = (entry & TABLE) != 0 && level < 3;
     if is_table {
-        let table_entry = entry & !(PXN_TABLE | UXN_TABLE);
+        let table_entry = entry & !PXN_TABLE;
         if table_entry != entry {
             write_entry(table, index, table_entry);
         }
@@ -140,7 +176,8 @@ fn clear_xn_leaf_entry(table: u64, level: u32, va: u64) -> bool {
         return clear_xn_leaf_entry(next, level + 1, va);
     }
 
-    let new_entry = entry & !(PXN | UXN);
+    // PXN only: the image runs at EL1, and must stay non-executable at EL0.
+    let new_entry = entry & !PXN;
     if new_entry == entry {
         return false;
     }

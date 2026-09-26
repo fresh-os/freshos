@@ -86,7 +86,10 @@ fn parse_layout(bytes: &[u8]) -> Result<ImageLayout, &'static str> {
     let mut saw_load = false;
 
     for idx in 0..e_phnum {
-        let ph = e_phoff + idx * e_phentsize;
+        let ph = idx
+            .checked_mul(e_phentsize)
+            .and_then(|off| e_phoff.checked_add(off))
+            .ok_or("program header offset overflow")?;
         let p_type = read_u32(bytes, ph).ok_or("truncated program header")?;
         if p_type != PT_LOAD {
             continue;
@@ -111,7 +114,11 @@ fn parse_layout(bytes: &[u8]) -> Result<ImageLayout, &'static str> {
 
         saw_load = true;
         min_vaddr = min_vaddr.min(align_down(p_vaddr, 4096));
-        max_vaddr = max_vaddr.max(align_up(p_vaddr + p_memsz as u64, 4096));
+        let end = p_vaddr
+            .checked_add(p_memsz as u64)
+            .and_then(|end| end.checked_add(4095))
+            .ok_or("ELF segment address overflow")?;
+        max_vaddr = max_vaddr.max(end & !4095);
         max_align = max_align.max(p_align);
     }
 
@@ -255,6 +262,11 @@ pub fn load_into(
                         n,
                     );
                 }
+            }
+            if perm == Perm::ReadExec {
+                // The code was written through the kernel's alias of the
+                // frame; make it visible to EL0's instruction fetch.
+                crate::arch::paging::sync_icache(pa, PAGE);
             }
             page += PAGE;
         }
