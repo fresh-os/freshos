@@ -5,6 +5,8 @@ extern crate alloc;
 
 mod arch;
 #[cfg(target_arch = "aarch64")]
+mod boot_images;
+#[cfg(target_arch = "aarch64")]
 mod elf;
 mod font;
 mod font_aa;
@@ -36,10 +38,6 @@ use uefi::boot;
 use uefi::mem::memory_map::{MemoryMap, MemoryType};
 use uefi::prelude::*;
 use uefi::proto::console::gop::{GraphicsOutput, PixelFormat};
-#[cfg(target_arch = "aarch64")]
-use uefi::proto::media::file::{File, FileAttribute, FileInfo, FileMode};
-#[cfg(target_arch = "aarch64")]
-use uefi::{cstr16, CStr16};
 
 #[cfg(not(test))]
 #[panic_handler]
@@ -104,76 +102,6 @@ const CH_SHELL_KEYS: u32 = 2;
 const CH_MOUSE_RAW: u32 = 3;
 const CH_MOUSE_EVENTS: u32 = 4;
 
-#[cfg(target_arch = "aarch64")]
-struct BootFile {
-    ptr: *mut u8,
-    len: usize,
-}
-
-#[cfg(target_arch = "aarch64")]
-fn load_esp_file(path: &CStr16) -> Option<BootFile> {
-    let mut fs = match boot::get_image_file_system(boot::image_handle()) {
-        Ok(fs) => fs,
-        Err(err) => {
-            serial_println!("  init fs unavailable: {:?}", err.status());
-            return None;
-        }
-    };
-    let mut root = match fs.open_volume() {
-        Ok(root) => root,
-        Err(err) => {
-            serial_println!("  init volume open failed: {:?}", err.status());
-            return None;
-        }
-    };
-    let handle = match root.open(path, FileMode::Read, FileAttribute::empty()) {
-        Ok(file) => file,
-        Err(err) => {
-            serial_println!("  init open failed: {:?}", err.status());
-            return None;
-        }
-    };
-    let mut file = match handle.into_regular_file() {
-        Some(file) => file,
-        None => {
-            serial_println!("  init path is not a regular file");
-            return None;
-        }
-    };
-
-    let mut info_buf = [0u8; 512];
-    let info = match file.get_info::<FileInfo>(&mut info_buf) {
-        Ok(info) => info,
-        Err(_) => {
-            serial_println!("  init file info unavailable");
-            return None;
-        }
-    };
-    let len = info.file_size() as usize;
-    let pool = match boot::allocate_pool(MemoryType::LOADER_DATA, len.max(1)) {
-        Ok(ptr) => ptr,
-        Err(err) => {
-            serial_println!("  init buffer alloc failed: {:?}", err.status());
-            return None;
-        }
-    };
-    let buf = unsafe { core::slice::from_raw_parts_mut(pool.as_ptr(), len) };
-    match file.read(buf) {
-        Ok(read) if read == len => Some(BootFile {
-            ptr: pool.as_ptr(),
-            len,
-        }),
-        Ok(read) => {
-            serial_println!("  init short read: {}/{}", read, len);
-            None
-        }
-        Err(err) => {
-            serial_println!("  init read failed: {:?}", err.status());
-            None
-        }
-    }
-}
-
 // ============================================================================
 // aarch64 entry point — graphical boot + preemptive scheduling
 // ============================================================================
@@ -214,33 +142,7 @@ fn main() -> Status {
 
     let is_bgr = matches!(pixel_format, PixelFormat::Bgr);
 
-    let init_file = load_esp_file(cstr16!("\\EFI\\FreshOS\\INIT.ELF"));
-    if let Some(file) = &init_file {
-        serial_println!("  Boot init: {} bytes from ESP", file.len);
-    } else {
-        serial_println!("  Boot init: missing, will use built-in launch path");
-    }
-
-    let pong_file = load_esp_file(cstr16!("\\EFI\\FreshOS\\PONG.ELF"));
-    if let Some(file) = &pong_file {
-        serial_println!("  Boot pong: {} bytes from ESP", file.len);
-    } else {
-        serial_println!("  Boot pong: missing, will use built-in service");
-    }
-
-    let pulse_file = load_esp_file(cstr16!("\\EFI\\FreshOS\\PULSE.ELF"));
-    if let Some(file) = &pulse_file {
-        serial_println!("  Boot pulse: {} bytes from ESP", file.len);
-    } else {
-        serial_println!("  Boot pulse: missing, will use built-in service");
-    }
-
-    let fault_file = load_esp_file(cstr16!("\\EFI\\FreshOS\\FAULT.ELF"));
-    if let Some(file) = &fault_file {
-        serial_println!("  Boot fault: {} bytes from ESP", file.len);
-    } else {
-        serial_println!("  Boot fault: missing, will use built-in service");
-    }
+    boot_images::load_all();
 
     let mmap = boot::memory_map(MemoryType::LOADER_DATA).expect("memory map");
     let mut usable_pages: u64 = 0;
@@ -402,8 +304,7 @@ fn main() -> Status {
     // path and EL0 infrastructure already exist.
     arch::context::init(ttbr0);
 
-    let loaded_init = init_file.as_ref().and_then(|file| {
-        let bytes = unsafe { core::slice::from_raw_parts(file.ptr, file.len) };
+    let loaded_init = boot_images::find("INIT.ELF").and_then(|bytes| {
         match elf::load_image(bytes) {
             Ok(image) => {
                 arch::paging::make_executable(image.base, image.size as u64);
@@ -422,8 +323,7 @@ fn main() -> Status {
         }
     });
 
-    if let Some(file) = pong_file.as_ref() {
-        let bytes = unsafe { core::slice::from_raw_parts(file.ptr, file.len) };
+    if let Some(bytes) = boot_images::find("PONG.ELF") {
         match elf::load_image(bytes) {
             Ok(image) => {
                 arch::paging::make_executable(image.base, image.size as u64);
@@ -441,8 +341,7 @@ fn main() -> Status {
         }
     }
 
-    if let Some(file) = pulse_file.as_ref() {
-        let bytes = unsafe { core::slice::from_raw_parts(file.ptr, file.len) };
+    if let Some(bytes) = boot_images::find("PULSE.ELF") {
         match elf::load_image(bytes) {
             Ok(image) => {
                 arch::paging::make_executable(image.base, image.size as u64);
@@ -460,8 +359,7 @@ fn main() -> Status {
         }
     }
 
-    if let Some(file) = fault_file.as_ref() {
-        let bytes = unsafe { core::slice::from_raw_parts(file.ptr, file.len) };
+    if let Some(bytes) = boot_images::find("FAULT.ELF") {
         let fault_region = frame_alloc::allocate_contiguous_aligned(
             EL0_FAULT_REGION_PAGES,
             EL0_FAULT_REGION_PAGES,
@@ -508,12 +406,11 @@ fn main() -> Status {
     if let Some(image) = loaded_init {
         arch::context::spawn_with_arg(image.entry, init_abi::api_ptr() as u64);
     } else {
-        arch::context::spawn(arm_tasks::keyboard_el1);
-        arch::context::spawn(arm_tasks::compositor_el1);
-        arch::context::spawn(arm_tasks::shell_el1);
-        arch::context::spawn(arm_tasks::dashboard_el1);
-        arch::context::spawn(arm_tasks::ipc_probe_ping_el1);
-        arch::context::spawn(arm_tasks::ipc_probe_pong_el1);
+        serial_println!("INIT.ELF missing from \\EFI\\FreshOS — nothing to run");
+        loop {
+            arch::interrupt_disable();
+            arch::halt();
+        }
     }
     serial_println!("  {} tasks ready", arch::context::task_count());
 
