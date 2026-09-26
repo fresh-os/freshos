@@ -219,6 +219,26 @@ class MalformedElfTest(FreshOSTestCase):
         self.boot.wait_for_log(r"\[init\] cannot start probe-badelf \(BADELF\.ELF\): Invalid")
         self.assertTrue(self.services()["pong"]["running"])
 
+    def test_failed_start_of_a_supervised_service_is_retried_with_backoff(self) -> None:
+        # probe-badelf is supervised (restart after 100 ms), and its binary is
+        # refused every time: init must keep retrying, doubling the wait up to
+        # its 5 s cap, rather than leave it down for good.
+        expected = [100, 200, 400, 800, 1600, 3200, 5000, 5000]
+        pattern = r"^\[init\] retrying probe-badelf in (\d+)ms: Invalid$"
+
+        def waits() -> list[int]:
+            return [int(m.group(1)) for m in self.boot.find_logs(pattern)]
+
+        self.wait_until(
+            lambda: len(waits()) >= len(expected),
+            timeout=30,
+            message=f"{len(expected)} retries of probe-badelf",
+        )
+        self.assertEqual(waits()[: len(expected)], expected)
+        # Each retry really asked the kernel again.
+        refusals = self.boot.find_logs(r"refused BADELF\.ELF: segment is writable and executable")
+        self.assertGreaterEqual(len(refusals), len(expected))
+
     def test_program_header_offset_overflow_is_refused(self) -> None:
         self.boot.wait_for_log(r"refused BADPHOFF\.ELF: program header offset overflow")
         self.boot.wait_for_log(r"\[init\] cannot start probe-badphoff \(BADPHOFF\.ELF\): Invalid")

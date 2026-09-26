@@ -57,7 +57,10 @@ const TABLE: &[Service] = &[
     Service { arg: 3, optional: true, ..service("probe-tpidr", "PROBEBAD.ELF") },
     Service { grants: &[(SINK, SEND), (PROBE, RECV)], optional: true, ..service("probe-chan", "PROBECHA.ELF") },
     Service { grants: &[(PING, RECV)], optional: true, ..service("probe-dup-recv", "PROBECHA.ELF") },
-    Service { optional: true, ..service("probe-badelf", "BADELF.ELF") },
+    // Supervised so that its refused start is retried: MalformedElfTest checks
+    // the backoff. Without BADELF.ELF on the ESP it is skipped like any other
+    // optional entry.
+    Service { restart_after_ms: Some(100), optional: true, ..service("probe-badelf", "BADELF.ELF") },
     Service { optional: true, ..service("probe-badphoff", "BADPHOFF.ELF") },
     // A supervised receiver that exits after its first message, and a sender
     // of three: the last two must wait in the channel for the restart. The
@@ -72,12 +75,19 @@ const TABLE: &[Service] = &[
     Service { grants: &[(BUF, SEND)], arg: 2, optional: true, ..service("probe-buf-tx", "PROBEBUF.ELF") },
 ];
 
+/// The longest init waits before retrying a supervised service it couldn't
+/// start.
+const RETRY_CAP_MS: u64 = 5_000;
+
 #[derive(Clone, Copy)]
 struct Runtime {
     /// The running instance, exactly: a task id alone may already belong to
     /// a newer task by the time its exit notice arrives.
     task: Option<TaskRef>,
     restart_at: Option<u64>,
+    /// The delay before the last retry of a failed start; 0 once a start
+    /// succeeds.
+    retry_ms: u64,
 }
 
 fn main(start: Startup) -> ! {
@@ -92,10 +102,10 @@ fn main(start: Startup) -> ! {
         }
     }
 
-    let mut state = [Runtime { task: None, restart_at: None }; TABLE.len()];
+    let mut state = [Runtime { task: None, restart_at: None, retry_ms: 0 }; TABLE.len()];
     log!("starting services");
     for (index, runtime) in state.iter_mut().enumerate() {
-        runtime.task = start_service(index, &channels);
+        launch(index, runtime, &channels);
     }
     log!("services launched");
 
@@ -111,7 +121,7 @@ fn main(start: Startup) -> ! {
             if state[index].restart_at.is_some_and(|at| now >= at) {
                 state[index].restart_at = None;
                 log!("restarting {}", TABLE[index].name);
-                state[index].task = start_service(index, &channels);
+                launch(index, &mut state[index], &channels);
             }
         }
     }
@@ -143,7 +153,7 @@ fn handle_message(message: &Message, state: &mut [Runtime], channels: &[Option<H
                     log!("restarting {name} (requested)");
                     // It's starting now, so any scheduled restart is moot.
                     state[index].restart_at = None;
-                    state[index].task = start_service(index, channels);
+                    launch(index, &mut state[index], channels);
                 }
             }
         }
@@ -151,24 +161,46 @@ fn handle_message(message: &Message, state: &mut [Runtime], channels: &[Option<H
     }
 }
 
-fn start_service(index: usize, channels: &[Option<Handle>; CHANNELS]) -> Option<TaskRef> {
+/// Start service `index` into `runtime`. If a supervised service can't
+/// start, for any reason but an optional binary's absence, try again later:
+/// first after its restart delay, then after twice the last wait, up to
+/// RETRY_CAP_MS. A refusal such as TableFull or OutOfMemory may pass, and
+/// without a retry the service would stay down for good.
+fn launch(index: usize, runtime: &mut Runtime, channels: &[Option<Handle>; CHANNELS]) {
+    let service = &TABLE[index];
+    runtime.task = None;
+    let error = match start_service(index, channels) {
+        Ok(task) => {
+            runtime.task = Some(task);
+            runtime.retry_ms = 0;
+            return;
+        }
+        Err(Error::NotFound) if service.optional => return,
+        Err(e) => e,
+    };
+    // Name the binary too: a missing or bad file must be findable from the
+    // log alone (decision 0006).
+    log!("cannot start {} ({}): {:?}", service.name, service.binary, error);
+    let Some(first_ms) = service.restart_after_ms else { return };
+    let wait_ms = if runtime.retry_ms == 0 {
+        first_ms
+    } else {
+        runtime.retry_ms.saturating_mul(2).min(RETRY_CAP_MS).max(first_ms)
+    };
+    runtime.retry_ms = wait_ms;
+    runtime.restart_at = Some(time_ns() + wait_ms * 1_000_000);
+    log!("retrying {} in {}ms: {:?}", service.name, wait_ms, error);
+}
+
+fn start_service(index: usize, channels: &[Option<Handle>; CHANNELS]) -> Result<TaskRef, Error> {
     let service = &TABLE[index];
     let mut grants = [Grant { handle: Handle(0), rights: Rights::NONE }; 16];
     for (grant, &(channel, rights)) in grants.iter_mut().zip(service.grants) {
         let Some(handle) = channels[channel] else {
             log!("cannot start {} ({}): channel {} missing", service.name, service.binary, channel);
-            return None;
+            return Err(Error::NoSuchHandle);
         };
         *grant = Grant { handle, rights };
     }
-    match spawn(service.name, service.binary, &grants[..service.grants.len()], service.arg) {
-        Ok(task) => Some(task),
-        Err(Error::NotFound) if service.optional => None,
-        Err(e) => {
-            // Name the binary too: a missing or bad file must be findable
-            // from the log alone (decision 0006).
-            log!("cannot start {} ({}): {:?}", service.name, service.binary, e);
-            None
-        }
-    }
+    spawn(service.name, service.binary, &grants[..service.grants.len()], service.arg)
 }
