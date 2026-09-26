@@ -19,53 +19,15 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 // Message — the unit of communication
 // ---------------------------------------------------------------------------
 
-pub const MSG_PING: u32 = 1;
-pub const MSG_PONG: u32 = 2;
-pub const MSG_IRQ: u32 = 10; // kernel → driver: raw interrupt data
-pub const MSG_MOUSE_RAW: u32 = 11; // kernel → mouse driver: raw byte
-pub const MSG_MOUSE: u32 = 12; // mouse driver → compositor: x, y, buttons
-pub const MSG_KEY_DOWN: u32 = 20;
-pub const MSG_KEY_UP: u32 = 21;
+pub use freshos_abi::Message;
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct Message {
-    pub tag: u32,
-    pub sender: u16,
-    pub len: u16,
-    pub payload: [u64; 4], // 32 bytes inline
-}
-
-impl Message {
-    pub const fn empty() -> Self {
-        Self {
-            tag: 0,
-            sender: 0,
-            len: 0,
-            payload: [0; 4],
-        }
-    }
-
-    pub fn new(tag: u32) -> Self {
-        Self {
-            tag,
-            sender: crate::arch::current_task() as u16,
-            len: 0,
-            payload: [0; 4],
-        }
-    }
-
-    pub fn with_data(mut self, slot: usize, value: u64) -> Self {
-        if slot < 4 {
-            self.payload[slot] = value;
-            let end = ((slot + 1) * 8) as u16;
-            if end > self.len {
-                self.len = end;
-            }
-        }
-        self
-    }
-}
+pub const MSG_PING: u32 = freshos_abi::tag::PING;
+pub const MSG_PONG: u32 = freshos_abi::tag::PONG;
+pub const MSG_IRQ: u32 = freshos_abi::tag::IRQ;
+pub const MSG_MOUSE_RAW: u32 = freshos_abi::tag::MOUSE_RAW;
+pub const MSG_MOUSE: u32 = freshos_abi::tag::MOUSE;
+pub const MSG_KEY_DOWN: u32 = freshos_abi::tag::KEY_DOWN;
+pub const MSG_KEY_UP: u32 = freshos_abi::tag::KEY_UP;
 
 // ---------------------------------------------------------------------------
 // Channel — bounded ring buffer with blocking receive
@@ -159,7 +121,10 @@ pub fn send(channel_id: u32, msg: &Message) -> Result<(), Error> {
     };
     let now_ns = crate::arch::time_ns();
 
-    ch.buf[ch.head] = *msg;
+    // The kernel decides who sent a message, never the sender (spec §4).
+    let mut stamped = *msg;
+    stamped.sender = crate::arch::current_task() as u16;
+    ch.buf[ch.head] = stamped;
     ch.head = (ch.head + 1) % CHANNEL_CAP;
     ch.count += 1;
 

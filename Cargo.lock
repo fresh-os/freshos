@@ -99,6 +99,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
+name = "freshos-abi"
+version = "0.1.0"
+
+[[package]]
 name = "freshos-fault"
 version = "0.1.0"
 
@@ -110,6 +114,7 @@ version = "0.1.0"
 name = "freshos-kernel"
 version = "0.1.0"
 dependencies = [
+ "freshos-abi",
  "rhai",
  "serde_json",
  "uefi",

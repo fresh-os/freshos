@@ -10,6 +10,7 @@ board-qemu-virt = []
 board-rpi4 = []
 
 [dependencies]
+freshos-abi = { path = "../lib/abi" }
 uefi = "0.33"
 # JSON-RPC for the MCP bridge (decision 0005); no_std with alloc.
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
