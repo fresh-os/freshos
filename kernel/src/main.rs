@@ -88,20 +88,6 @@ struct BootInfo {
 }
 
 // ============================================================================
-// IPC channel layout
-// ============================================================================
-//
-//   Ch 0: kernel IRQ handler → keyboard driver   (raw scancodes)
-//   Ch 1: keyboard driver → compositor           (key events)
-//   Ch 2: compositor → shell workspace           (forwarded key events)
-
-const CH_KBD_RAW: u32 = 0;
-const CH_KBD_EVENTS: u32 = 1;
-const CH_SHELL_KEYS: u32 = 2;
-const CH_MOUSE_RAW: u32 = 3;
-const CH_MOUSE_EVENTS: u32 = 4;
-
-// ============================================================================
 // aarch64 entry point — graphical boot + preemptive scheduling
 // ============================================================================
 
@@ -253,7 +239,8 @@ fn main() -> Status {
 
     serial_println!("  Desktop rendered");
 
-    // ---- Page tables: patch UEFI's tables for EL0 access ----
+    // ---- Paging: the firmware's map stays the kernel's, EL1-only; set the
+    // system registers each EL0 task's own table relies on (addrspace) ----
     let ttbr0 = unsafe { arch::paging::init() };
 
     // ---- Syscall support ----
@@ -292,18 +279,16 @@ fn main() -> Status {
         surf1_addr
     );
 
-    // ---- IPC channels ----
+    // ---- IPC channels (ipc::KBD_EVENTS, SHELL_KEYS, INIT_INBOX) ----
     let _ = ipc::create().expect("ch0: kbd events");
     let _ = ipc::create().expect("ch1: shell keys");
     let _ = ipc::create().expect("ch2: init inbox");
     serial_println!("  {} IPC channels", ipc::channel_count());
 
-    // ---- Scheduler: spawn tasks ----
-    // Tasks run at EL1 with direct syscall dispatch, sharing one page table.
-    // That began as an HVF limitation: older QEMU hung on every tlbi, so page
-    // tables couldn't be managed safely. QEMU 11 runs tlbi correctly, so
-    // per-task EL0 isolation is now the goal here too (v1 rung 1). The SVC
-    // path and EL0 infrastructure already exist.
+    // ---- Scheduler ----
+    // Services run at EL0, each in its own address space (ASID = task slot),
+    // and reach the kernel only through SVC. The in-kernel built-ins run at
+    // EL1 on the kernel's table until each moves out (decision 0006).
     arch::context::init(ttbr0);
 
     // The kernel starts only init (decision 0006), with RECV on its inbox.
