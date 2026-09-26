@@ -14,17 +14,28 @@ fn main(start: Startup) -> ! {
     let pongs = start.handle(1);
     loop {
         let mut rtts = [0u64; SAMPLES];
-        for rtt in rtts.iter_mut() {
+        let mut samples = 0;
+        let mut failures = 0;
+        for _ in 0..SAMPLES {
             let sent = time_ns();
             if send(pings, &Message::new(tag::PING).with_data(0, sent)).is_err() {
+                failures += 1;
                 continue;
             }
-            if let Ok(reply) = recv(pongs) {
-                *rtt = time_ns().saturating_sub(reply.payload[0]);
+            match recv(pongs) {
+                Ok(reply) => {
+                    rtts[samples] = time_ns().saturating_sub(reply.payload[0]);
+                    samples += 1;
+                }
+                Err(_) => failures += 1,
             }
         }
+        // Only successful round trips count; a failure must not drag the
+        // median towards zero.
+        let rtts = &mut rtts[..samples];
         rtts.sort_unstable();
-        log!("rtt_median_ns={} samples={}", rtts[SAMPLES / 2], SAMPLES);
+        let median = rtts.get(samples / 2).copied().unwrap_or(0);
+        log!("rtt_median_ns={} samples={} failures={}", median, samples, failures);
         // Nothing arrives on pongs between batches, so this is a one-second sleep.
         match recv_until(pongs, time_ns() + 1_000_000_000) {
             Ok(_) | Err(Error::Timeout) => {}

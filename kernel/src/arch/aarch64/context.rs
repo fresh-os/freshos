@@ -262,7 +262,10 @@ pub fn switch_away(frame: u64) -> u64 {
 pub fn hand_off(frame: u64, target: usize) -> u64 {
     let t = unsafe { &mut *tasks() };
     // Only a ready task has a live saved frame; a Free slot's `sp` is stale.
-    debug_assert!(target < MAX_TASKS && t[target].state == State::Ready);
+    // Anything else gets an ordinary switch instead.
+    if target >= MAX_TASKS || t[target].state != State::Ready {
+        return switch_away(frame);
+    }
     let cur = CURRENT.load(Ordering::SeqCst);
     if t[cur].state != State::Free {
         t[cur].sp = frame;

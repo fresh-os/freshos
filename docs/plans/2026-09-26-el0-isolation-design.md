@@ -324,8 +324,9 @@ state, as an interrupt does, so the scheduler's switch applies to both:
 **Delivery-latency metric.** The kernel records the time from each send to
 the moment the receiver has the message, for every message, in `metrics`
 as `ipc_delivery` (latest and max). This replaces the ping-reported
-`ipc_rtt`, which an EL0 ping can no longer write. `ping` logs its measured
-round trip as `[ping] rtt_ns=…` for tests.
+`ipc_rtt`, which an EL0 ping can no longer write. `ping` logs each batch of
+100 round trips as `[ping] rtt_median_ns=… samples=… failures=…` for
+tests; the median counts only successful round trips.
 
 ## 5. `init`, supervision and boot
 
